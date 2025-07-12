@@ -10,7 +10,8 @@ import tqdm
 import shutil
 
 # === 读取数据 ===
-spike_df = pd.read_csv("spike_counts_5Hz.csv").drop(columns=["Index"], errors="ignore")
+# Spike counts are now provided at 1000 Hz
+spike_df = pd.read_csv("spike_counts_1000Hz.csv").drop(columns=["Index"], errors="ignore")
 behavior_df = pd.read_csv("F5D10_outdoor_modified.csv").drop(columns=["Index"], errors="ignore")
 position_df = pd.read_csv("positions_F5D10_outdoor.csv")[["head_x", "head_y"]]
 dlc_df = pd.read_csv("final_filtered_F5D10_outdoor_50hz.csv")
@@ -30,25 +31,11 @@ angle_cols = [col for col in dlc_df.columns if "angle_" in col and "change" not 
 angle_change_cols = [col for col in dlc_df.columns if "angle_change" in col]
 linear_cols = list(set(dlc_df.columns) - set(angle_cols) - set(angle_change_cols))
 
-dlc_binned = pd.DataFrame()
-for col in angle_cols:
-    dlc_binned[col] = bin_column(dlc_df[col], 24, -180, 180)
-for col in angle_change_cols:
-    dlc_binned[col] = bin_column(dlc_df[col], 30)
-for col in linear_cols:
-    dlc_binned[col] = bin_column(dlc_df[col], 30)
-
 # === IMU 特征分 bin ===
 imu_df["roll"] = unwrap(imu_df["roll"])
 imu_df["yaw"] = unwrap(imu_df["yaw"])
 imu_df["pitch"] = unwrap(imu_df["pitch"])
 
-imu_binned = pd.DataFrame()
-for col in imu_df.columns:
-    if col in ["roll", "yaw", "pitch"]:
-        imu_binned[col] = bin_column(imu_df[col], 24, -np.pi, np.pi)
-    else:
-        imu_binned[col] = bin_column(imu_df[col], 30)
 
 # === 位置分 bin ===
 position_df["x_bin"] = (position_df["head_x"] // 50).astype(int)
@@ -57,38 +44,45 @@ unique_positions = position_df[["x_bin", "y_bin"]].drop_duplicates().reset_index
 unique_positions["pos_idx"] = np.arange(len(unique_positions))
 position_df = position_df.merge(unique_positions, on=["x_bin", "y_bin"], how="left")
 
-# === 下采样到 5Hz ===
-def downsample_df(df, factor=10):
-    T = df.shape[0] // factor
-    return df[:T*factor].values.reshape(T, factor, -1).mean(axis=1)
+# === Upsample to 1000 Hz ===
+def repeat_df(df, factor=20):
+    """Repeat rows for discrete data (zero order hold)."""
+    return df.loc[df.index.repeat(factor)].reset_index(drop=True)
 
-behavior_df_5hz = pd.DataFrame(
-    downsample_df(behavior_df).round().astype(int),
-    columns=behavior_df.columns
-)
-dlc_binned_5hz = pd.DataFrame(
-    downsample_df(dlc_binned).astype(int),
-    columns=dlc_binned.columns
-)
-imu_binned_5hz = pd.DataFrame(
-    downsample_df(imu_binned).astype(int),
-    columns=imu_binned.columns
-)
-position_idx_5hz = pd.DataFrame(
-    downsample_df(position_df[["pos_idx"]]).astype(int),
-    columns=["position"]
-)
+def upsample_df(df, factor=20):
+    """Linear interpolation for continuous data."""
+    old_idx = np.arange(len(df))
+    new_idx = np.linspace(0, len(df) - 1, len(df) * factor)
+    data = {col: np.interp(new_idx, old_idx, df[col]) for col in df.columns}
+    return pd.DataFrame(data)
+
+behavior_df_1khz = repeat_df(behavior_df)
+dlc_df_1khz = upsample_df(dlc_df)
+imu_df_1khz = upsample_df(imu_df)
+position_idx_1khz = repeat_df(position_df[["pos_idx"]])
+
+dlc_binned_1khz = pd.DataFrame({
+    col: bin_column(dlc_df_1khz[col], 24, -180, 180) if col in angle_cols
+    else bin_column(dlc_df_1khz[col], 30)
+    for col in dlc_df_1khz.columns
+})
+imu_binned_1khz = pd.DataFrame({
+    col: bin_column(imu_df_1khz[col], 24, -np.pi, np.pi) if col in ["roll", "yaw", "pitch"]
+    else bin_column(imu_df_1khz[col], 30)
+    for col in imu_df_1khz.columns
+})
+position_idx_1khz.columns = ["position"]
 
 # === 编码非行为部分（强制固定 categories） ===
 categories = []
-for col in dlc_binned_5hz.columns:
+for col in dlc_binned_1khz.columns:
     if "angle_" in col:
         categories.append(np.arange(24))
     elif "angle_change" in col:
         categories.append(np.arange(30))
     else:
         categories.append(np.arange(30))
-for col in imu_binned_5hz.columns:
+for col in imu_binned_1khz.columns:
     if col in ["roll", "yaw", "pitch"]:
         categories.append(np.arange(24))
     else:
@@ -97,9 +91,9 @@ categories.append(np.arange(len(unique_positions)))  # position
 
 encoder = OneHotEncoder(categories=categories, sparse_output=False, handle_unknown="ignore")
 non_behavior_all = np.concatenate([
-    dlc_binned_5hz,
-    imu_binned_5hz,
-    position_idx_5hz
+    dlc_binned_1khz,
+    imu_binned_1khz,
+    position_idx_1khz
 ], axis=1)
 onehot_all = encoder.fit_transform(non_behavior_all)
 
@@ -107,10 +101,10 @@ onehot_all = encoder.fit_transform(non_behavior_all)
 os.makedirs("cv_results", exist_ok=True)
 with open("cv_results/feature_mapping.txt", "w") as f:
     dim = 0
-    for col in behavior_df_5hz.columns:
+    for col in behavior_df_1khz.columns:
         f.write(f"{dim}-{dim}: behavior.{col}\n")
         dim += 1
-    feature_names = list(dlc_binned_5hz.columns) + list(imu_binned_5hz.columns) + ["position"]
+    feature_names = list(dlc_binned_1khz.columns) + list(imu_binned_1khz.columns) + ["position"]
     for col, cats in zip(feature_names, encoder.categories_):
         n_cats = len(cats)
         f.write(f"{dim}-{dim + n_cats - 1}: {col}\n")
@@ -118,7 +112,7 @@ with open("cv_results/feature_mapping.txt", "w") as f:
 
 with open("cv_results/coefficients_mapping.txt", "w") as f:
     dim = 0
-    for col in behavior_df_5hz.columns:
+    for col in behavior_df_1khz.columns:
         f.write(f"{dim}-{dim}: behavior.{col}\n")
         dim += 1
     for col, cats in zip(feature_names, encoder.categories_):
@@ -128,9 +122,9 @@ with open("cv_results/coefficients_mapping.txt", "w") as f:
 shutil.copy("cv_results/coefficients_mapping.txt", "cv_results/pvalue_mapping.txt")
 
 # === 特征拼接并对齐 ===
-all_features = np.concatenate([behavior_df_5hz, onehot_all], axis=1)
-start_idx = int(1.238591123957225e4 * 5)
-end_idx = int(1.588404693733597e4 * 5) - 1
+all_features = np.concatenate([behavior_df_1khz, onehot_all], axis=1)
+start_idx = int(1.238591123957225e4 * 1000)
+end_idx = int(1.588404693733597e4 * 1000) - 1
 spike_aligned = spike_df.iloc[start_idx:end_idx].reset_index(drop=True)
 feature_aligned = pd.DataFrame(all_features[:spike_aligned.shape[0]])
 
