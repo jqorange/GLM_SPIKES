@@ -11,6 +11,30 @@ from sklearn.model_selection import KFold
 from sklearn.linear_model import PoissonRegressor
 import tqdm
 
+
+def create_raised_cosine_basis(n_basis=16, history_ms=160, dt=1):
+    """Create raised cosine basis functions on a log time scale."""
+    ttb = np.arange(dt, history_ms + dt, dt)
+    log_t = np.log(ttb)
+    centers = np.linspace(log_t[0], log_t[-1], n_basis)
+    width = centers[1] - centers[0]
+    basis = []
+    for c in centers:
+        arg = (log_t - c) * np.pi / (2 * width)
+        basis.append((np.cos(np.clip(arg, -np.pi, np.pi)) + 1) / 2)
+    return np.stack(basis, axis=1)
+
+
+def spike_history_design(spikes, basis):
+    """Create design matrix using spike history and given basis."""
+    T = len(spikes)
+    L, K = basis.shape
+    X_hist = np.zeros((T, K))
+    for lag in range(1, L + 1):
+        shifted = np.concatenate((np.zeros(lag, dtype=spikes.dtype), spikes[:-lag]))
+        X_hist += shifted[:, None] * basis[lag - 1]
+    return X_hist
+
 # === 1. 读取 spike 二值数据 ===
 with h5py.File("spike_binary_1000Hz.h5", "r") as hf:
     spike_array = hf["spike_binary"][:]  # shape: (T, N)
@@ -92,11 +116,14 @@ X_sparse = encoder.fit_transform(all_binned)  # CSR matrix, shape=(T, total_bins
 # === 9. 生成 feature_mapping 和 coefficients_mapping ===
 input_features = all_binned.columns.tolist()
 feat_names_out = encoder.get_feature_names_out(input_features)
+history_basis = create_raised_cosine_basis(16, 160)
+history_feature_names = [f"history_{i+1}" for i in range(history_basis.shape[1])]
 
 os.makedirs("cv_results", exist_ok=True)
 with open("cv_results/feature_mapping.txt", "w") as f_feat, \
      open("cv_results/coefficients_mapping.txt", "w") as f_coef:
-    for idx, fname in enumerate(feat_names_out):
+    all_feature_names = list(feat_names_out) + history_feature_names
+    for idx, fname in enumerate(all_feature_names):
         f_feat.write(f"{idx}: {fname}\n")
         f_coef.write(f"{idx}: {fname}\n")
 
@@ -112,6 +139,12 @@ X_aligned     = X_sparse[start_idx:end_idx, :]
 
 y_all = spike_aligned.values  # shape=(end_idx-start_idx, N)
 
+# spike history design matrices for each neuron
+spike_history_all = [
+    spike_history_design(spike_aligned[neuron].values, history_basis)
+    for neuron in neuron_names
+]
+
 # === 11. GLM + 5-fold CV ===
 kf = KFold(n_splits=5, shuffle=False)
 for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
@@ -124,16 +157,22 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
 
     train_betas, train_pvals = [], []
     train_r2s, val_r2s = [], []
+    pred_val_all = np.zeros_like(y_val, dtype=float)
 
     for i, neuron in enumerate(neuron_names):
         y_tr = y_train[:, i]
         y_va = y_val[:, i]
 
-        model = PoissonRegressor(alpha=0.0005, max_iter=10000)
-        model.fit(X_train, y_tr)
+        hist_tr = spike_history_all[i][train_idx]
+        hist_va = spike_history_all[i][val_idx]
+        Xtr = np.hstack([X_train, hist_tr])
+        Xva = np.hstack([X_val, hist_va])
 
-        mu_tr = model.predict(X_train)
-        mu_va = model.predict(X_val)
+        model = PoissonRegressor(alpha=0.0005, max_iter=10000)
+        model.fit(Xtr, y_tr)
+
+        mu_tr = model.predict(Xtr)
+        mu_va = model.predict(Xva)
         beta = model.coef_
         train_betas.append(beta)
 
@@ -149,7 +188,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
         # Fisher 信息矩阵计算标准误 & p-value
         W = mu_tr
         try:
-            Fisher = X_train.T @ (W[:, None] * X_train) + 1e-4 * np.eye(X_train.shape[1])
+            Fisher = Xtr.T @ (W[:, None] * Xtr) + 1e-4 * np.eye(Xtr.shape[1])
             cov    = np.linalg.inv(Fisher)
             se     = np.sqrt(np.maximum(np.diag(cov), 1e-12))
             z      = beta / (se + 1e-8)
@@ -158,6 +197,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
             print(f"[Warning] Fisher singular for {neuron}")
             pvals = np.full_like(beta, np.nan)
         train_pvals.append(pvals)
+        pred_val_all[:, i] = mu_va
 
     # 保存本 fold 结果
     pd.DataFrame(train_betas, index=neuron_names) \
@@ -169,5 +209,9 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
         "pseudo_R2_train": train_r2s,
         "pseudo_R2_val": val_r2s
     }).to_csv(f"cv_results/fold{fold}_r2.csv", index=False)
+
+    with h5py.File(f"cv_results/fold{fold}_pred.h5", "w") as hf:
+        hf.create_dataset("pred", data=pred_val_all, compression="gzip")
+        hf.create_dataset("true", data=y_val, compression="gzip")
 
 print("\n✅ All folds finished. Results in cv_results/.")
