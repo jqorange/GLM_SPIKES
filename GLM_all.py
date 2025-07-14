@@ -1,183 +1,173 @@
 import os
-import pandas as pd
-import numpy as np
-from sklearn.linear_model import PoissonRegressor
-from sklearn.model_selection import KFold
-from sklearn.preprocessing import OneHotEncoder
-from scipy.stats import norm
-from numpy import unwrap
-import tqdm
 import shutil
+import h5py
+import numpy as np
+import pandas as pd
+from numpy import unwrap
+from scipy import sparse
+from scipy.stats import norm
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import KFold
+from sklearn.linear_model import PoissonRegressor
+import tqdm
 
-# === 读取数据 ===
-# Spike counts are now provided at 1000 Hz
-spike_df = pd.read_csv("spike_counts_1000Hz.csv").drop(columns=["Index"], errors="ignore")
-behavior_df = pd.read_csv("F5D10_outdoor_modified.csv").drop(columns=["Index"], errors="ignore")
+# === 1. 读取 spike 二值数据 ===
+with h5py.File("spike_binary_1000Hz.h5", "r") as hf:
+    spike_array = hf["spike_binary"][:]  # shape: (T, N)
+neuron_names = [f"neuron_{i+1}" for i in range(spike_array.shape[1])]
+spike_df = pd.DataFrame(spike_array, columns=neuron_names)
+
+# === 2. 读取其它原始数据 ===
+behavior_df = pd.read_csv("F5D10_outdoor_modified.csv") \
+                .drop(columns=["Index"], errors="ignore")
 position_df = pd.read_csv("positions_F5D10_outdoor.csv")[["head_x", "head_y"]]
-dlc_df = pd.read_csv("final_filtered_F5D10_outdoor_50hz.csv")
-imu_df = pd.read_csv("F5D10_outdoor_IMU_features_basic.csv")
+dlc_df      = pd.read_csv("final_filtered_F5D10_outdoor_50hz.csv")[["head_v", "bodyCenter1_v"]]
+imu_df      = pd.read_csv("F5D10_outdoor_IMU_features_basic.csv")[["roll", "yaw", "pitch", "speed_z"]]
 
-# === 分 bin 函数 ===
+# === 3. 分 bin 工具函数 ===
 def bin_column(series, bins, min_val=None, max_val=None):
     if min_val is None: min_val = series.min()
     if max_val is None: max_val = series.max()
-    binned = np.digitize(series, np.linspace(min_val, max_val, bins+1)) - 1
-    binned[binned >= bins] = bins - 1
-    binned[binned < 0] = 0
+    edges = np.linspace(min_val, max_val, bins + 1)
+    binned = np.digitize(series, edges) - 1
+    binned = np.clip(binned, 0, bins - 1)
     return binned
 
-# === DLC 特征分 bin ===
-angle_cols = [col for col in dlc_df.columns if "angle_" in col and "change" not in col]
-angle_change_cols = [col for col in dlc_df.columns if "angle_change" in col]
-linear_cols = list(set(dlc_df.columns) - set(angle_cols) - set(angle_change_cols))
+# === 4. 准备位置 bin ===
+# 这里用 4*4.611473 单位分格大小
+position_df["x_bin"] = (position_df["head_x"] // (4 * 4.611473)).astype(int)
+position_df["y_bin"] = (position_df["head_y"] // (4 * 4.611473)).astype(int)
+unique_pos = position_df[["x_bin","y_bin"]].drop_duplicates().reset_index(drop=True)
+unique_pos["pos_idx"] = np.arange(len(unique_pos))
+position_df = position_df.merge(unique_pos, on=["x_bin","y_bin"], how="left")
 
-# === IMU 特征分 bin ===
-imu_df["roll"] = unwrap(imu_df["roll"])
-imu_df["yaw"] = unwrap(imu_df["yaw"])
-imu_df["pitch"] = unwrap(imu_df["pitch"])
-
-
-# === 位置分 bin ===
-position_df["x_bin"] = (position_df["head_x"] // 50).astype(int)
-position_df["y_bin"] = (position_df["head_y"] // 50).astype(int)
-unique_positions = position_df[["x_bin", "y_bin"]].drop_duplicates().reset_index(drop=True)
-unique_positions["pos_idx"] = np.arange(len(unique_positions))
-position_df = position_df.merge(unique_positions, on=["x_bin", "y_bin"], how="left")
-
-# === Upsample to 1000 Hz ===
+# === 5. 把所有 50Hz 数据 upsample/重复 到 1000Hz ===
 def repeat_df(df, factor=20):
-    """Repeat rows for discrete data (zero order hold)."""
     return df.loc[df.index.repeat(factor)].reset_index(drop=True)
 
 def upsample_df(df, factor=20):
-    """Linear interpolation for continuous data."""
     old_idx = np.arange(len(df))
-    new_idx = np.linspace(0, len(df) - 1, len(df) * factor)
-    data = {col: np.interp(new_idx, old_idx, df[col]) for col in df.columns}
+    new_idx = np.linspace(0, len(df)-1, len(df)*factor)
+    data = {col: np.interp(new_idx, old_idx, df[col].values) for col in df.columns}
     return pd.DataFrame(data)
 
-behavior_df_1khz = repeat_df(behavior_df)
-dlc_df_1khz = upsample_df(dlc_df)
-imu_df_1khz = upsample_df(imu_df)
-position_idx_1khz = repeat_df(position_df[["pos_idx"]])
+behavior_1k = repeat_df(behavior_df)
+dlc_1k      = upsample_df(dlc_df)
+imu_df["roll"]  = unwrap(imu_df["roll"])
+imu_df["yaw"]   = unwrap(imu_df["yaw"])
+imu_df["pitch"] = unwrap(imu_df["pitch"])
+imu_1k      = upsample_df(imu_df)
+pos_1k      = repeat_df(position_df[["pos_idx"]]).rename(columns={"pos_idx":"position"})
 
-dlc_binned_1khz = pd.DataFrame({
-    col: bin_column(dlc_df_1khz[col], 24, -180, 180) if col in angle_cols
-    else bin_column(dlc_df_1khz[col], 30)
-    for col in dlc_df_1khz.columns
+# === 6. 对 DLC / IMU 做 binning ===
+# 将角度与非角度分开 binned
+angle_cols       = [c for c in dlc_1k.columns if "angle_" in c]
+angle_change_cols= [c for c in dlc_1k.columns if "angle_change" in c]
+linear_cols      = [c for c in dlc_1k.columns if c not in angle_cols + angle_change_cols]
+
+dlc_binned = pd.DataFrame({
+    col: bin_column(dlc_1k[col], 24, -180, 180) if col in angle_cols
+         else bin_column(dlc_1k[col], 30)
+    for col in dlc_1k.columns
 })
-imu_binned_1khz = pd.DataFrame({
-    col: bin_column(imu_df_1khz[col], 24, -np.pi, np.pi) if col in ["roll", "yaw", "pitch"]
-    else bin_column(imu_df_1khz[col], 30)
-    for col in imu_df_1khz.columns
+
+imu_binned = pd.DataFrame({
+    col: bin_column(imu_1k[col], 24, -np.pi, np.pi) if col in ["roll","yaw","pitch"]
+         else bin_column(imu_1k[col], 30)
+    for col in imu_1k.columns
 })
-position_idx_1khz.columns = ["position"]
 
-# === 编码非行为部分（强制固定 categories） ===
-categories = []
-for col in dlc_binned_1khz.columns:
-    if "angle_" in col:
-        categories.append(np.arange(24))
-    elif "angle_change" in col:
-        categories.append(np.arange(30))
-    else:
-        categories.append(np.arange(30))
-for col in imu_binned_1khz.columns:
-    if col in ["roll", "yaw", "pitch"]:
-        categories.append(np.arange(24))
-    else:
-        categories.append(np.arange(30))
-categories.append(np.arange(len(unique_positions)))  # position
-
-encoder = OneHotEncoder(categories=categories, sparse_output=False, handle_unknown="ignore")
-non_behavior_all = np.concatenate([
-    dlc_binned_1khz,
-    imu_binned_1khz,
-    position_idx_1khz
+# === 7. 合并所有离散化后的特征 DataFrame ===
+all_binned = pd.concat([
+    behavior_1k.reset_index(drop=True),
+    dlc_binned.reset_index(drop=True),
+    imu_binned.reset_index(drop=True),
+    pos_1k.reset_index(drop=True)
 ], axis=1)
-onehot_all = encoder.fit_transform(non_behavior_all)
 
-# === 写 feature mapping ===
+# === 8. 一次性 One-Hot 编码为稀疏矩阵 ===
+encoder = OneHotEncoder(sparse_output=True, handle_unknown="ignore", drop='if_binary' )
+X_sparse = encoder.fit_transform(all_binned)  # CSR matrix, shape=(T, total_bins)
+
+# === 9. 生成 feature_mapping 和 coefficients_mapping ===
+input_features = all_binned.columns.tolist()
+feat_names_out = encoder.get_feature_names_out(input_features)
+
 os.makedirs("cv_results", exist_ok=True)
-with open("cv_results/feature_mapping.txt", "w") as f:
-    dim = 0
-    for col in behavior_df_1khz.columns:
-        f.write(f"{dim}-{dim}: behavior.{col}\n")
-        dim += 1
-    feature_names = list(dlc_binned_1khz.columns) + list(imu_binned_1khz.columns) + ["position"]
-    for col, cats in zip(feature_names, encoder.categories_):
-        n_cats = len(cats)
-        f.write(f"{dim}-{dim + n_cats - 1}: {col}\n")
-        dim += n_cats
+with open("cv_results/feature_mapping.txt", "w") as f_feat, \
+     open("cv_results/coefficients_mapping.txt", "w") as f_coef:
+    for idx, fname in enumerate(feat_names_out):
+        f_feat.write(f"{idx}: {fname}\n")
+        f_coef.write(f"{idx}: {fname}\n")
 
-with open("cv_results/coefficients_mapping.txt", "w") as f:
-    dim = 0
-    for col in behavior_df_1khz.columns:
-        f.write(f"{dim}-{dim}: behavior.{col}\n")
-        dim += 1
-    for col, cats in zip(feature_names, encoder.categories_):
-        for i in range(len(cats)):
-            f.write(f"{dim}: {col} (bin {cats[i]})\n")
-            dim += 1
+# 复制一份给 pvalue_mapping
 shutil.copy("cv_results/coefficients_mapping.txt", "cv_results/pvalue_mapping.txt")
 
-# === 特征拼接并对齐 ===
-all_features = np.concatenate([behavior_df_1khz, onehot_all], axis=1)
+# === 10. 按时间区间对齐 spike 与特征 ===
 start_idx = int(1.238591123957225e4 * 1000)
-end_idx = int(1.588404693733597e4 * 1000) - 1
+end_idx   = int(1.588404693733597e4 * 1000)  # 不 -1，Python 切片自动开区间
+
 spike_aligned = spike_df.iloc[start_idx:end_idx].reset_index(drop=True)
-feature_aligned = pd.DataFrame(all_features[:spike_aligned.shape[0]])
+X_aligned     = X_sparse[start_idx:end_idx, :]
 
-X = feature_aligned.values
-y_all = spike_aligned.values
-neuron_names = spike_aligned.columns.tolist()
+y_all = spike_aligned.values  # shape=(end_idx-start_idx, N)
 
-# === GLM + Cross Validation ===
+# === 11. GLM + 5-fold CV ===
 kf = KFold(n_splits=5, shuffle=False)
-for fold, (train_idx, val_idx) in enumerate(kf.split(X), 1):
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_aligned), 1):
     print(f"\n=== Fold {fold} ===")
-    X_train, X_val = X[train_idx], X[val_idx]
-    y_train_all, y_val_all = y_all[train_idx], y_all[val_idx]
+    # 只在当前 fold toarray() 展开
+    X_train = X_aligned[train_idx].toarray()
+    X_val   = X_aligned[val_idx].toarray()
+    y_train = y_all[train_idx]
+    y_val   = y_all[val_idx]
 
     train_betas, train_pvals = [], []
     train_r2s, val_r2s = [], []
 
-    for i, neuron in tqdm.tqdm(enumerate(neuron_names)):
-        y_train = y_train_all[:, i]
-        y_val = y_val_all[:, i]
+    for i, neuron in enumerate(neuron_names):
+        y_tr = y_train[:, i]
+        y_va = y_val[:, i]
 
         model = PoissonRegressor(alpha=0.0005, max_iter=10000)
-        model.fit(X_train, y_train)
-        y_pred_train = model.predict(X_train)
-        y_pred_val = model.predict(X_val)
+        model.fit(X_train, y_tr)
+
+        mu_tr = model.predict(X_train)
+        mu_va = model.predict(X_val)
         beta = model.coef_
         train_betas.append(beta)
 
-        def deviance(y, y_pred):
+        # deviance-based pseudo-R²
+        def dev(y, y_pred):
             eps = 1e-8
-            return 2 * np.sum(y * np.log((y + eps) / (y_pred + eps)) - (y - y_pred))
+            return 2 * np.sum(y * np.log((y+eps)/(y_pred+eps)) - (y - y_pred))
+        r2_tr = 1 - dev(y_tr, mu_tr) / dev(y_tr, np.full_like(y_tr, y_tr.mean()))
+        r2_va = 1 - dev(y_va, mu_va) / dev(y_va, np.full_like(y_va, y_va.mean()))
+        train_r2s.append(r2_tr)
+        val_r2s.append(r2_va)
 
-        r2_train = 1 - deviance(y_train, y_pred_train) / deviance(y_train, np.full_like(y_train, np.mean(y_train)))
-        r2_val = 1 - deviance(y_val, y_pred_val) / deviance(y_val, np.full_like(y_val, np.mean(y_val)))
-        train_r2s.append(r2_train)
-        val_r2s.append(r2_val)
-
-        mu = y_pred_train
-        W_diag = mu
+        # Fisher 信息矩阵计算标准误 & p-value
+        W = mu_tr
         try:
-            reg_term = 1e-4 * np.eye(X_train.shape[1])
-            Fisher = X_train.T @ (W_diag[:, None] * X_train) + reg_term
-            cov = np.linalg.inv(Fisher)
-            se = np.sqrt(np.maximum(np.diag(cov), 1e-12))
-            z = beta / (se + 1e-8)
-            p = 2 * (1 - norm.cdf(np.abs(z)))
+            Fisher = X_train.T @ (W[:, None] * X_train) + 1e-4 * np.eye(X_train.shape[1])
+            cov    = np.linalg.inv(Fisher)
+            se     = np.sqrt(np.maximum(np.diag(cov), 1e-12))
+            z      = beta / (se + 1e-8)
+            pvals  = 2 * (1 - norm.cdf(np.abs(z)))
         except np.linalg.LinAlgError:
-            print(f"[Warning] Singular matrix for neuron {neuron}")
-            p = np.full_like(beta, np.nan)
-        train_pvals.append(p)
+            print(f"[Warning] Fisher singular for {neuron}")
+            pvals = np.full_like(beta, np.nan)
+        train_pvals.append(pvals)
 
-    pd.DataFrame(train_betas, index=neuron_names).to_csv(f"cv_results/fold{fold}_train_coefficients.csv")
-    pd.DataFrame(train_pvals, index=neuron_names).to_csv(f"cv_results/fold{fold}_train_pvalues.csv")
-    pd.DataFrame({"neuron": neuron_names, "pseudo_R2_train": train_r2s, "pseudo_R2_val": val_r2s}).to_csv(f"cv_results/fold{fold}_r2.csv", index=False)
+    # 保存本 fold 结果
+    pd.DataFrame(train_betas, index=neuron_names) \
+      .to_csv(f"cv_results/fold{fold}_train_coefficients.csv")
+    pd.DataFrame(train_pvals, index=neuron_names) \
+      .to_csv(f"cv_results/fold{fold}_train_pvalues.csv")
+    pd.DataFrame({
+        "neuron": neuron_names,
+        "pseudo_R2_train": train_r2s,
+        "pseudo_R2_val": val_r2s
+    }).to_csv(f"cv_results/fold{fold}_r2.csv", index=False)
 
-print("\n✅ Finished all folds. Coefficients, p-values, and R² saved.")
+print("\n✅ All folds finished. Results in cv_results/.")
