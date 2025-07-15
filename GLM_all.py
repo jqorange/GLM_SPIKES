@@ -10,7 +10,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.model_selection import KFold
 from sklearn.linear_model import PoissonRegressor
 from joblib import Parallel, delayed
-
+from tqdm import tqdm
 # 1) 抬头余弦基底 & 快速卷积函数
 def create_raised_cosine_basis(n_basis=16, history_ms=160, dt=1):
     ttb = np.arange(dt, history_ms+dt, dt, dtype=np.float32)
@@ -187,7 +187,7 @@ for fold in range(1,6):
     Xtr_s = X_al[tr]; Xva_s = X_al[va]
     ytr   = Y[tr];    yva    = Y[va]
 
-    results = Parallel(n_jobs=-1, backend="threading")(
+    results = Parallel(n_jobs=24, backend="threading")(
         delayed(fit_neuron_sparse)(
             i, tr, va,
             Xtr_s, Xva_s,
@@ -195,7 +195,7 @@ for fold in range(1,6):
             spike_df.iloc[start:end].values,
             history_basis
         )
-        for i in range(len(neuron_names))
+        for i in tqdm(range(len(neuron_names)))
     )
 
     betas,pvals,r2t,r2v,pr = zip(*results)
