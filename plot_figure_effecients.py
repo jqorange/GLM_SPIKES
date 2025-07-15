@@ -1,24 +1,33 @@
+"""Plot spatial coefficient maps using output from ``GLM_all.py``."""
+
 import os
+import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# === 1. 加载系数矩阵与 feature_mapping.txt ===
-coef_path = r"cv_results\fold1_train_coefficients.csv"
-mapping_path = r"cv_results\feature_mapping.txt"
+# === 1. 加载系数矩阵与 mapping 文件 ===
+coef_path = r"cv_results/fold1_train_coefficients.csv"
+mapping_path = r"cv_results/coefficients_mapping.txt"
 df_betas = pd.read_csv(coef_path, index_col=0)
 
 # === 2. 提取 position one-hot 的维度范围 ===
+# 解析 mapping ("idx: name") 以确定 position 的维度
 pos_start, pos_end = None, None
 with open(mapping_path, "r") as f:
     for line in f:
-        if "position" in line.lower():
-            parts = line.strip().split(":")[0].split("-")
-            pos_start, pos_end = int(parts[0]), int(parts[1])
-            break
+        if not line.strip() or ":" not in line:
+            continue
+        idx_str, name = line.split(":", 1)
+        idx = int(idx_str.strip())
+        base = re.sub(r"_\d+$", "", name.strip())
+        if base.lower() == "position":
+            if pos_start is None:
+                pos_start = idx
+            pos_end = idx
 
 if pos_start is None or pos_end is None:
-    raise ValueError("⚠️ 未在 feature_mapping.txt 中找到 'position' 行。")
+    raise ValueError("⚠️ 未在 mapping 文件中找到 'position' 相关列。")
 
 # === 3. 提取位置系数 ===
 pos_cols = df_betas.columns[pos_start:pos_end + 1]
