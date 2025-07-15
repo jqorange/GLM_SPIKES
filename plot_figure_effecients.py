@@ -1,90 +1,83 @@
-"""Plot spatial coefficient maps using output from ``GLM_all.py``."""
-
 import os
 import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# === 1. 加载系数矩阵与 mapping 文件 ===
-coef_path = r"cv_results/fold1_train_coefficients.csv"
-mapping_path = r"cv_results/coefficients_mapping.txt"
-df_betas = pd.read_csv(coef_path, index_col=0)
+# === 配置路径 ===
+coeff_csv = "cv_results/fold1_train_coefficients.csv"
+mapping_txt = "cv_results/coefficients_mapping.txt"
+pos_csv    = "positions_F5D10_outdoor.csv"
+out_dir    = "figure_coefficients/positions"
 
-# === 2. 提取 position one-hot 的维度范围 ===
-# 解析 mapping ("idx: name") 以确定 position 的维度
-pos_start, pos_end = None, None
-with open(mapping_path, "r") as f:
+# === 1. 加载系数矩阵和 mapping ===
+df_coef = pd.read_csv(coeff_csv, index_col=0)
+mapping = []
+with open(mapping_txt, 'r') as f:
     for line in f:
-        if not line.strip() or ":" not in line:
-            continue
-        idx_str, name = line.split(":", 1)
-        idx = int(idx_str.strip())
-        base = re.sub(r"_\d+$", "", name.strip())
-        if base.lower() == "position":
-            if pos_start is None:
-                pos_start = idx
-            pos_end = idx
+        if ':' in line:
+            _, name = line.split(':', 1)
+            mapping.append(name.strip())
 
-if pos_start is None or pos_end is None:
-    raise ValueError("⚠️ 未在 mapping 文件中找到 'position' 相关列。")
+# === 2. 找到 position one-hot 列区间 ===
+pos_indices = [i for i, nm in enumerate(mapping)
+               if re.sub(r'_\d+$', '', nm).lower() == 'position']
+if not pos_indices:
+    raise ValueError("未在 mapping 中找到 'position' 特征。")
+pos_start, pos_end = min(pos_indices), max(pos_indices)
 
-# === 3. 提取位置系数 ===
-pos_cols = df_betas.columns[pos_start:pos_end + 1]
-beta_pos = df_betas[pos_cols]
+# 提取 position 对应的列标签（按位置切片）
+pos_cols = df_coef.columns[pos_start:pos_end+1]
+beta_pos = df_coef[pos_cols]
 
-# === 4. 获取真实出现过的位置索引 ===
-position_path = r"positions_F5D10_outdoor.csv"
-position_df = pd.read_csv(position_path)[["head_x", "head_y"]]
+# === 3. 读取位置数据并构建完整网格 ===
+pos_df = pd.read_csv(pos_csv)[['head_x', 'head_y']]
+bin_size = 4 * 4.611473
+# 计算 bin
+pos_df['x_bin'] = (pos_df['head_x'] // bin_size).astype(int)
+pos_df['y_bin'] = (pos_df['head_y'] // bin_size).astype(int)
+# 保持与训练时相同的 pos_idx 顺序: 首次出现顺序
+uniq = pos_df[['x_bin', 'y_bin']].drop_duplicates().reset_index(drop=True)
+uniq['pos_idx'] = np.arange(len(uniq))
+# 检查一致性
+n_bins = pos_end - pos_start + 1
+if uniq.shape[0] != n_bins:
+    print(f"警告: mapping 中 {n_bins} 个 position 特征, 但实际识别到 {uniq.shape[0]} 个格子。")
 
-# 分 bin
-position_df["x_bin"] = (position_df["head_x"] // 50).astype(int)
-position_df["y_bin"] = (position_df["head_y"] // 50).astype(int)
-unique_positions = position_df[["x_bin", "y_bin"]].drop_duplicates().reset_index(drop=True)
-unique_positions["pos_idx"] = np.arange(len(unique_positions))
+# 网格尺寸
+x_min, x_max = uniq['x_bin'].min(), uniq['x_bin'].max()
+y_min, y_max = uniq['y_bin'].min(), uniq['y_bin'].max()
+grid_w = x_max - x_min + 1
+grid_h = y_max - y_min + 1
 
-# 映射每个位置为 pos_idx
-position_df = position_df.merge(unique_positions, on=["x_bin", "y_bin"], how="left")
-
-# 下采样 pos_idx
-def downsample_df(df, factor=10):
-    T = df.shape[0] // factor
-    return df[:T*factor].values.reshape(T, factor, -1).mean(axis=1)
-
-position_idx_5hz = downsample_df(position_df[["pos_idx"]]).astype(int).flatten()
-used_pos_idx_set = sorted(np.unique(position_idx_5hz))
-
-# 获取实际用到的 x_bin, y_bin
-used_positions = unique_positions[unique_positions["pos_idx"].isin(used_pos_idx_set)].reset_index(drop=True)
-
-# 检查维度一致性
-if beta_pos.shape[1] != used_positions.shape[0]:
-    raise ValueError(f"🚨 Beta 维度和 used_positions 不一致：{beta_pos.shape[1]} vs {used_positions.shape[0]}")
-
-# === 5. 绘图 ===
-os.makedirs("figure_effecients", exist_ok=True)
-
-for neuron_name in beta_pos.index:
-    beta = beta_pos.loc[neuron_name].values
-    merged = used_positions.copy()
-    merged["beta"] = beta
-
-    x_max = merged["x_bin"].max() + 1
-    y_max = merged["y_bin"].max() + 1
-    heatmap = np.full((y_max, x_max), np.nan)
-
-    for _, row in merged.iterrows():
-        x, y = int(row["x_bin"]), int(row["y_bin"])
-        heatmap[y, x] = row["beta"]
-
-    plt.figure(figsize=(8, 6))
-    plt.imshow(heatmap, cmap="coolwarm", origin="lower")
-    plt.colorbar(label="GLM Coefficient")
-    plt.title(f"Spatial Importance | {neuron_name}")
-    plt.xlabel("x_bin")
-    plt.ylabel("y_bin")
+# === 4. 绘图保存 ===
+os.makedirs(out_dir, exist_ok=True)
+for neuron in beta_pos.index:
+    beta = beta_pos.loc[neuron].values
+    # 初始化网格，默认 0
+    heatmap = np.zeros((grid_h, grid_w), dtype=np.float32)
+    # 填充已访问格子
+    for _, row in uniq.iterrows():
+        idx = int(row['pos_idx'])
+        if idx < beta.size:
+            xi = int(row['x_bin'] - x_min)
+            yi = int(row['y_bin'] - y_min)
+            heatmap[yi, xi] = beta[idx]
+    # 绘制热图
+    plt.figure(figsize=(6, 5))
+    im = plt.imshow(
+        heatmap,
+        origin='lower',
+        cmap='coolwarm',
+        vmin=np.nanmin(beta),
+        vmax=np.nanmax(beta)
+    )
+    plt.colorbar(im, label='GLM Coefficient')
+    plt.title(f"Spatial Importance | {neuron}")
+    plt.xlabel('x_bin')
+    plt.ylabel('y_bin')
     plt.tight_layout()
-    plt.savefig(f"figure_effecients/positions/{neuron_name}.png", dpi=300)
+    plt.savefig(os.path.join(out_dir, f"{neuron}.png"), dpi=300)
     plt.close()
 
-print("✅ 所有 neuron 的空间热图已保存至 'figure_effecients/'。")
+print(f"✅ 空间系数热图已保存至 {out_dir}")

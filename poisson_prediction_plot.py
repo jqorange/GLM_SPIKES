@@ -58,7 +58,10 @@ def analyze_fold(
     })
 
     # save CSV
-    csv_path = os.path.join(out_dir, f"fold{fold}_neuron{neuron_index}.csv")
+    out_dir_csv = os.path.join(out_dir, "csv")
+    if not os.path.exists(out_dir_csv):
+        os.makedirs(out_dir_csv)
+    csv_path = os.path.join(out_dir_csv, f"fold{fold}_neuron{neuron_index}.csv")
     df.to_csv(csv_path, index=False)
 
     # slice to requested range
@@ -74,8 +77,10 @@ def analyze_fold(
     plt.title(f"Fold {fold}, Neuron {neuron_index}")
     plt.legend()
     plt.tight_layout()
-
-    img_path = os.path.join(out_dir, f"fold{fold}_neuron{neuron_index}.png")
+    out_dir_img = os.path.join(out_dir, "img")
+    if not os.path.exists(out_dir_img):
+        os.makedirs(out_dir_img)
+    img_path = os.path.join(out_dir_img, f"fold{fold}_neuron{neuron_index}.png")
     plt.savefig(img_path, dpi=300)
     plt.close()
 
