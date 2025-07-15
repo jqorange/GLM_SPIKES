@@ -1,29 +1,48 @@
+"""Plot coefficient profiles for all features produced by ``GLM_all.py``."""
+
 import os
+import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
 # === 路径 ===
-coef_path = r"cv_results\fold5_train_coefficients.csv"
-mapping_path = r"cv_results\feature_mapping.txt"
+coef_path = r"cv_results/fold5_train_coefficients.csv"
+mapping_path = r"cv_results/coefficients_mapping.txt"
 output_dir = "figure_effecients"
 
 df_betas = pd.read_csv(coef_path, index_col=0)
 
 # === 分类函数 ===
-def is_angle_feature(name):
+def is_angle_feature(name: str) -> bool:
+    """Return True if the feature represents an angle."""
     return ("angle_" in name.lower() or name.lower() in ["roll", "yaw", "pitch"])
 
-# === 读取 mapping 文件 ===
-feature_dims = {}
+# === 读取 mapping 文件 ("idx: name") ===
+mapping = []
 with open(mapping_path, "r") as f:
     for line in f:
-        if not line.strip(): continue
-        idx_range, feature = line.strip().split(":")
-        start, end = map(int, idx_range.strip().split("-"))
-        feature = feature.strip()
-        if feature.startswith("behavior."): continue
-        feature_dims[feature] = (start, end)
+        if not line.strip() or ":" not in line:
+            continue
+        idx_str, name = line.split(":", 1)
+        idx = int(idx_str.strip())
+        mapping.append((idx, name.strip()))
+
+# 按索引排序并推断每个 feature 的维度范围
+mapping.sort(key=lambda x: x[0])
+feature_dims = {}
+current = None
+start_idx = None
+for idx, name in mapping:
+    base = re.sub(r"_\d+$", "", name)
+    if base != current:
+        if current is not None:
+            feature_dims[current] = (start_idx, prev_idx)
+        current = base
+        start_idx = idx
+    prev_idx = idx
+if current is not None:
+    feature_dims[current] = (start_idx, prev_idx)
 
 # === 绘图 ===
 for feature, (start, end) in feature_dims.items():
