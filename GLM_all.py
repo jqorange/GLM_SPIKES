@@ -4,206 +4,216 @@ import h5py
 import numpy as np
 import pandas as pd
 from numpy import unwrap
+from scipy import sparse
 from scipy.stats import norm
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.model_selection import KFold
 from sklearn.linear_model import PoissonRegressor
-from tqdm import tqdm
+from joblib import Parallel, delayed
 
+# 1) 抬头余弦基底 & 快速卷积函数
 def create_raised_cosine_basis(n_basis=16, history_ms=160, dt=1):
-    ttb = np.arange(dt, history_ms + dt, dt, dtype=np.float32)
+    ttb = np.arange(dt, history_ms+dt, dt, dtype=np.float32)
     log_t = np.log(ttb)
     centers = np.linspace(log_t[0], log_t[-1], n_basis, dtype=np.float32)
     width = centers[1] - centers[0]
-    basis = []
-    for c in centers:
-        arg = (log_t - c) * np.pi / (2 * width)
-        basis.append(((np.cos(np.clip(arg, -np.pi, np.pi)) + 1) / 2).astype(np.float32))
+    basis = [ ((np.cos(np.clip((log_t-c)*np.pi/(2*width), -np.pi, np.pi))+1)/2).astype(np.float32)
+              for c in centers ]
     return np.stack(basis, axis=1)
 
 def spike_history_design_fast(spikes, basis):
-    T = spikes.shape[0]
-    basis_rev = basis[::-1, :].astype(np.float32)
-    Xh_cols = [
-        np.convolve(spikes, basis_rev[:, k], mode="full")[:T].astype(np.float32)
-        for k in range(basis_rev.shape[1])
-    ]
-    return np.stack(Xh_cols, axis=1)
+    T, K = spikes.shape[0], basis.shape[1]
+    rev = basis[::-1,:]
+    # 每个基底做一次卷积
+    cols = [ np.convolve(spikes, rev[:,k], mode="full")[:T].astype(np.float32)
+             for k in range(K) ]
+    return np.stack(cols, axis=1)  # (T,K)
+
+def fit_neuron_sparse(i, tr, va,
+                      Xb_sparse, Xb_val_sparse,
+                      y_tr, y_va,
+                      spike_arr, history_basis):
+    # 生成历史设计 (T,K)
+    spikes = spike_arr[:, i].astype(np.float32)
+    H = spike_history_design_fast(spikes, history_basis)
+    H_tr, H_va = H[tr], H[va]
+    # 稀疏拼接：行为特征已在 Xb_sparse 中；history 直接 csr
+    Xtr = sparse.hstack([Xb_sparse, sparse.csr_matrix(H_tr)], format="csr")
+    Xva = sparse.hstack([Xb_val_sparse, sparse.csr_matrix(H_va)], format="csr")
+    # 拟合 Poisson GLM
+    y_train_i = y_tr[:,i]
+    y_val_i   = y_va[:,i]
+    mdl = PoissonRegressor(alpha=0.001, max_iter=10000, fit_intercept=True)
+    mdl.fit(Xtr, y_train_i)
+    mu_tr = mdl.predict(Xtr)
+    mu_va = mdl.predict(Xva)
+    coef = mdl.coef_.astype(np.float32)
+    intercept = np.float32(mdl.intercept_)
+    # pseudo-R2
+    def _dev(y, yp):
+        eps=1e-8
+        return 2*np.sum(y*np.log((y+eps)/(yp+eps)) - (y-yp))
+    r2_tr = 1 - _dev(y_train_i,mu_tr)/_dev(y_train_i, y_train_i.mean())
+    r2_va = 1 - _dev(y_val_i,mu_va)/_dev(y_val_i, y_val_i.mean())
+    # Fisher 信息算 p‐value
+    W = mu_tr
+
+    reg = mdl.alpha  # 0.001
+    Wmat = sparse.diags(W, format="csr")  # (n, n)
+    F = Xtr.T @ (Wmat @ Xtr)
+    F += reg * sparse.eye(Xtr.shape[1], format="csr")
+    Cov = np.linalg.inv(F.toarray()).astype(np.float32)
+    se  = np.sqrt(np.maximum(np.diag(Cov),1e-12)).astype(np.float32)
+    z   = coef/(se+1e-8)
+    pcoef = (2*(1-norm.cdf(np.abs(z)))).astype(np.float32)
+
+    # 拼 intercept
+    coefs = np.concatenate([coef, [intercept]]).astype(np.float32)
+    pvals = np.concatenate([pcoef, [np.nan]]).astype(np.float32)
+    return coefs, pvals, r2_tr, r2_va, mu_va.astype(np.float32)
 
 # -----------------------------------------------------------------------------
-# 1. Read and preprocess everything up to X_aligned, y_all
+# 2) 读取原始，并对齐到 1000Hz
 # -----------------------------------------------------------------------------
-with h5py.File("spike_binary_1000Hz.h5", "r") as hf:
-    spike_array = hf["spike_binary"][:].astype(np.float32)
-neuron_names = [f"neuron_{i+1}" for i in range(spike_array.shape[1])]
-spike_df = pd.DataFrame(spike_array, columns=neuron_names)
+# 2.1 Spike
+with h5py.File("spike_binary_200Hz.h5","r") as hf:
+    spike_arr = hf["spike_binary"][:].astype(np.float32)
+neuron_names = [f"neuron_{i+1}" for i in range(spike_arr.shape[1])]
+spike_df = pd.DataFrame(spike_arr, columns=neuron_names)
 
-behavior_df = pd.read_csv("F5D10_outdoor_modified.csv").drop(columns=["Index"], errors="ignore")
-position_df = pd.read_csv("positions_F5D10_outdoor.csv")[["head_x", "head_y"]]
-dlc_df      = pd.read_csv("final_filtered_F5D10_outdoor_50hz.csv")[["head_v", "bodyCenter1_v"]]
-imu_df      = pd.read_csv("F5D10_outdoor_IMU_features_basic.csv")[["roll","yaw","pitch","speed_z"]]
+# 2.2 行为(原始) + 位置 + DLC + IMU
+beh = pd.read_csv("F5D10_outdoor_modified.csv").drop(columns=["Index"],errors="ignore")
+pos = pd.read_csv("positions_F5D10_outdoor.csv")[["head_x","head_y"]]
+dlc = pd.read_csv("final_filtered_F5D10_outdoor_50hz.csv")[["head_v","bodyCenter1_v"]]
+imu = pd.read_csv("F5D10_outdoor_IMU_features_basic.csv")[["roll","yaw","pitch","speed_z"]]
 
-def bin_column(series, bins, min_val=None, max_val=None):
-    if min_val is None: min_val = series.min()
-    if max_val is None: max_val = series.max()
-    edges = np.linspace(min_val, max_val, bins + 1, dtype=np.float32)
-    binned = np.digitize(series, edges) - 1
-    return np.clip(binned, 0, bins - 1).astype(np.int16)
+# 2.3 位置分箱
+def bin_col(s,b, mn=None, mx=None):
+    if mn is None: mn=s.min()
+    if mx is None: mx=s.max()
+    edges = np.linspace(mn,mx,b+1)
+    out = np.digitize(s,edges)-1
+    return np.clip(out,0,b-1).astype(np.int16)
 
-# position binning
-position_df["x_bin"] = (position_df["head_x"] // (4*4.611473)).astype(int)
-position_df["y_bin"] = (position_df["head_y"] // (4*4.611473)).astype(int)
-unique_pos = position_df[["x_bin","y_bin"]].drop_duplicates().reset_index(drop=True)
-unique_pos["pos_idx"] = np.arange(len(unique_pos), dtype=np.int16)
-position_df = position_df.merge(unique_pos, on=["x_bin","y_bin"], how="left")
+pos["x_bin"] = (pos["head_x"]//(4*4.611473)).astype(int)
+pos["y_bin"] = (pos["head_y"]//(4*4.611473)).astype(int)
+uniq = pos[["x_bin","y_bin"]].drop_duplicates().reset_index(drop=True)
+uniq["pos_idx"]=np.arange(len(uniq))
+pos = pos.merge(uniq,on=["x_bin","y_bin"],how="left")
 
-# upsample / repeat to 1kHz
-def repeat_df(df, factor=20):
-    return df.loc[df.index.repeat(factor)].reset_index(drop=True)
-
-def upsample_df(df, factor=20):
-    old = np.arange(len(df))
-    new = np.linspace(0, len(df)-1, len(df)*factor)
-    return pd.DataFrame({c: np.interp(new, old, df[c].values).astype(np.float32)
+# 2.4 上采样到1000Hz
+def repeat_df(df,f=4):
+    return df.loc[df.index.repeat(f)].reset_index(drop=True)
+def upsample_df(df,f=4):
+    old=np.arange(len(df))
+    new=np.linspace(0,len(df)-1,len(df)*f)
+    return pd.DataFrame({c:np.interp(new,old,df[c].values).astype(np.float32)
                          for c in df.columns})
 
-behavior_1k = repeat_df(behavior_df)
-dlc_1k      = upsample_df(dlc_df)
-imu_df["roll"]  = unwrap(imu_df["roll"])
-imu_df["yaw"]   = unwrap(imu_df["yaw"])
-imu_df["pitch"] = unwrap(imu_df["pitch"])
-imu_1k      = upsample_df(imu_df)
-pos_1k      = repeat_df(position_df[["pos_idx"]]).rename(columns={"pos_idx":"position"})
+beh_2h = repeat_df(beh)
+dlc_2h = upsample_df(dlc)
+imu["roll"]=unwrap(imu["roll"])
+imu["yaw"] =unwrap(imu["yaw"])
+imu["pitch"]=unwrap(imu["pitch"])
+imu_2h = upsample_df(imu)
+pos_2h = repeat_df(pos[["pos_idx"]]).rename(columns={"pos_idx":"position"})
 
-# bin DLC/IMU
-dlc_binned = pd.DataFrame({
-    c: bin_column(dlc_1k[c], 24, -180, 180) if "angle_" in c
-       else bin_column(dlc_1k[c], 30)
-    for c in dlc_1k.columns
-})
-imu_binned = pd.DataFrame({
-    c: bin_column(imu_1k[c], 24, -np.pi, np.pi) if c in ["roll","yaw","pitch"]
-       else bin_column(imu_1k[c], 30)
-    for c in imu_1k.columns
-})
+# 2.5 分箱 DLC/IMU
+dlc_bin = pd.DataFrame({c: (bin_col(dlc_2h[c],24,-180,180) if "angle" in c else bin_col(dlc_2h[c],30))
+                       for c in dlc_2h})
+imu_bin = pd.DataFrame({c: (bin_col(imu_2h[c],24,-np.pi,np.pi) if c in ["roll","yaw","pitch"]
+                            else bin_col(imu_2h[c],30))
+                       for c in imu_2h})
 
-# combine and one-hot encode
-all_binned = pd.concat([behavior_1k, dlc_binned, imu_binned, pos_1k], axis=1).reset_index(drop=True)
-encoder = OneHotEncoder(sparse_output=True, handle_unknown="ignore", drop='if_binary')
-X_sparse = encoder.fit_transform(all_binned).astype(np.float32)
+# -----------------------------------------------------------------------------
+# 3) OneHotEncoder（只对分箱列） + 保留所有箱
+# -----------------------------------------------------------------------------
+cat_df = pd.concat([dlc_bin, imu_bin, pos_2h],axis=1).reset_index(drop=True)
 
-# build mappings
-feat_names_out = encoder.get_feature_names_out(all_binned.columns.tolist())
-history_basis = create_raised_cosine_basis(16, 160)  # float32
-history_names = [f"history_{i+1}" for i in range(history_basis.shape[1])]
-os.makedirs("cv_results", exist_ok=True)
+# 为每一列显式提供 categories
+cats = []
+for col in cat_df:
+    if col in ["roll","yaw","pitch"]:
+        cats.append(np.arange(24))
+    elif col in ["head_v","bodyCenter1_v","speed_z"]:
+        cats.append(np.arange(30))
+    elif col=="position":
+        cats.append(np.arange(uniq.shape[0]))
+    else:
+        cats.append(np.arange(30))
+encoder = OneHotEncoder(categories=cats,
+                        sparse_output=True,
+                        handle_unknown="ignore")
+X_cat = encoder.fit_transform(cat_df).astype(np.float32)  # CSR
+
+# -----------------------------------------------------------------------------
+# 4) 把行为特征(连续)、one-hot 特征拼成最终 CSR
+# -----------------------------------------------------------------------------
+X_beh = sparse.csr_matrix(beh_2h.values.astype(np.float32))  # (T, B)
+X_both = sparse.hstack([X_beh, X_cat],format="csr")           # (T, B+P)
+
+# -----------------------------------------------------------------------------
+# 5) 准备 mapping 文件
+# -----------------------------------------------------------------------------
+feat_beh = list(beh_2h.columns)
+feat_cat = encoder.get_feature_names_out(cat_df.columns.tolist())
+history_basis = create_raised_cosine_basis(16,160)
+hist_names = [f"history_{i+1}" for i in range(history_basis.shape[1])]
+all_names  = feat_beh + list(feat_cat) + hist_names + ["intercept"]
+
+os.makedirs("cv_results",exist_ok=True)
 with open("cv_results/feature_mapping.txt","w") as f1, \
      open("cv_results/coefficients_mapping.txt","w") as f2:
-    for idx,name in enumerate(np.concatenate([feat_names_out, history_names])):
+    for idx,name in enumerate(all_names):
         f1.write(f"{idx}: {name}\n")
         f2.write(f"{idx}: {name}\n")
-shutil.copy("cv_results/coefficients_mapping.txt","cv_results/pvalue_mapping.txt")
-
-# align spike & X
-start_idx = int(1.238591123957225e4 * 1000)
-end_idx   = int(1.588404693733597e4 * 1000)
-spike_aligned = spike_df.iloc[start_idx:end_idx].reset_index(drop=True)
-X_aligned     = X_sparse[:end_idx-start_idx, :]
-y_all         = spike_aligned.values.astype(np.float32)
+shutil.copy("cv_results/coefficients_mapping.txt",
+            "cv_results/pvalue_mapping.txt")
 
 # -----------------------------------------------------------------------------
-# 2. Pre-split and save each fold to disk
+# 6) 对齐 spike & 特征，CV 拆分并行拟合
 # -----------------------------------------------------------------------------
-kf = KFold(n_splits=5, shuffle=False)
-splits = list(kf.split(X_aligned))
-os.makedirs("cv_results/splits", exist_ok=True)
+start = int(1.238591123957225e4*200)
+end   = int(1.588404693733597e4*200)
+Y     = spike_df.iloc[start:end].reset_index(drop=True).values.astype(np.float32)
+X_al  = X_both[:end-start]  # CSR
 
-for fold, (tr_idx, va_idx) in enumerate(splits, 1):
-    X_tr = X_aligned[tr_idx].toarray().astype(np.float32)
-    X_va = X_aligned[va_idx].toarray().astype(np.float32)
-    y_tr = y_all[tr_idx]
-    y_va = y_all[va_idx]
-    np.savez_compressed(f"cv_results/splits/fold{fold}.npz",
-                        X_train=X_tr, y_train=y_tr,
-                        X_val  =X_va, y_val  =y_va)
-    del X_tr, X_va, y_tr, y_va
+kf  = KFold(n_splits=5,shuffle=False)
+spl = list(kf.split(X_al))
 
-# free big arrays
-del X_aligned, y_all, all_binned
+for fold in range(1,6):
+    print(f"fold: {fold}")
+    tr,va = spl[fold-1]
+    Xtr_s = X_al[tr]; Xva_s = X_al[va]
+    ytr   = Y[tr];    yva    = Y[va]
 
-# -----------------------------------------------------------------------------
-# 3. Load each fold file and run GLM + history on-the-fly
-# -----------------------------------------------------------------------------
-P = None
-K = history_basis.shape[1]
-for fold in range(1, 6):
-    print(f"\n=== Fold {fold} ===")
-    data = np.load(f"cv_results/splits/fold{fold}.npz")
-    X_train, y_train = data["X_train"], data["y_train"]
-    X_val,   y_val   = data["X_val"],   data["y_val"]
-    if P is None:
-        P = X_train.shape[1]
-        Xtr_base = np.empty((X_train.shape[0], P+K), dtype=np.float32)
-        Xva_base = np.empty((X_val.shape[0],   P+K), dtype=np.float32)
-    Xtr_base[:, :P] = X_train
-    Xva_base[:, :P] = X_val
+    results = Parallel(n_jobs=-1, backend="threading")(
+        delayed(fit_neuron_sparse)(
+            i, tr, va,
+            Xtr_s, Xva_s,
+            ytr, yva,
+            spike_df.iloc[start:end].values,
+            history_basis
+        )
+        for i in range(len(neuron_names))
+    )
 
-    train_betas, train_pvals = [], []
-    train_r2s, val_r2s       = [], []
-    pred_val_all             = np.zeros_like(y_val, dtype=np.float32)
-
-    for i, neuron in enumerate(tqdm(neuron_names, desc="Neurons")):
-        # on-the-fly history
-        spikes = spike_aligned[neuron].values.astype(np.float32)
-        hist_full = spike_history_design_fast(spikes, history_basis)
-        tr_idx, va_idx = splits[fold-1]
-        hist_tr = hist_full[tr_idx]
-        hist_va = hist_full[va_idx]
-        del hist_full
-
-        Xtr_base[:, P:] = hist_tr
-        Xva_base[:, P:] = hist_va
-
-        y_tr = y_train[:, i]
-        y_va = y_val[:, i]
-        model = PoissonRegressor(alpha=0.0005, max_iter=10000)
-        model.fit(Xtr_base, y_tr)
-
-        mu_tr = model.predict(Xtr_base).astype(np.float32)
-        mu_va = model.predict(Xva_base).astype(np.float32)
-        train_betas.append(model.coef_.astype(np.float32))
-
-        def _dev(y, yp):
-            eps = 1e-8
-            return 2 * np.sum(y*np.log((y+eps)/(yp+eps)) - (y-yp))
-        train_r2s.append(1 - _dev(y_tr, mu_tr)/_dev(y_tr, y_tr.mean()))
-        val_r2s  .append(1 - _dev(y_va, mu_va)/_dev(y_va, y_va.mean()))
-
-        W = mu_tr
-        try:
-            Fisher = Xtr_base.T @ (W[:,None]*Xtr_base) + 1e-4*np.eye(P+K, dtype=np.float32)
-            cov    = np.linalg.inv(Fisher)
-            se     = np.sqrt(np.maximum(np.diag(cov),1e-12))
-            z      = model.coef_.astype(np.float32)/(se+1e-8)
-            train_pvals.append((2*(1-norm.cdf(np.abs(z)))).astype(np.float32))
-        except np.linalg.LinAlgError:
-            train_pvals.append(np.full((P+K,), np.nan, dtype=np.float32))
-
-        pred_val_all[:, i] = mu_va
-
-    # save results per fold
-    pd.DataFrame(train_betas, index=neuron_names)\
+    betas,pvals,r2t,r2v,pr = zip(*results)
+    Bmat = np.stack(betas,axis=0)
+    Pmat = np.stack(pvals,axis=0)
+    dfR  = pd.DataFrame({
+      "neuron": neuron_names,
+      "pseudo_R2_train": r2t,
+      "pseudo_R2_val":   r2v
+    })
+    pd.DataFrame(Bmat, index=neuron_names)\
       .to_csv(f"cv_results/fold{fold}_train_coefficients.csv")
-    pd.DataFrame(train_pvals, index=neuron_names)\
+    pd.DataFrame(Pmat, index=neuron_names)\
       .to_csv(f"cv_results/fold{fold}_train_pvalues.csv")
-    pd.DataFrame({
-        "neuron": neuron_names,
-        "pseudo_R2_train": train_r2s,
-        "pseudo_R2_val":  val_r2s
-    }).to_csv(f"cv_results/fold{fold}_r2.csv", index=False)
+    dfR.to_csv(f"cv_results/fold{fold}_r2.csv",index=False)
 
     with h5py.File(f"cv_results/fold{fold}_pred.h5","w") as hf:
-        hf.create_dataset("pred", data=pred_val_all, compression="gzip")
-        hf.create_dataset("true", data=y_val,           compression="gzip")
+        hf.create_dataset("pred",data=np.stack(pr,axis=1),compression="gzip")
+        hf.create_dataset("true",data=yva,           compression="gzip")
 
-print("\n✅ All folds finished. Results in cv_results/.")
+print("✅ Done.")
