@@ -6,6 +6,8 @@ Drop-one contribution plotting (pyramidal-only) with:
   - PLUS indoor-only and outdoor-only plots (per-feature), where feature order is
     sorted by group mean (high -> low)
   - Feature selection via --features (comma-separated). Features not listed are ignored.
+  - Optional: use --forward_modulated_only to limit each feature to neurons whose forward-search
+    final model includes that feature (still pyramidal only).
   - Filter: only neurons with full DevExpl >= --min_full_devexpl enter downstream analysis
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
@@ -26,6 +28,7 @@ Run example:
   python plot_contribution.py ^
     --weights_base "D:\\Jiaqi\\Projects\\GLM_File\\GLM_Poisson_Forward\\weights_Poisson_forward" ^
     --min_full_devexpl 0.1 ^
+    --forward_modulated_only ^
     --features "Position,Speed,roll,yaw,pitch"
 """
 
@@ -38,6 +41,7 @@ from typing import List
 from contribution_utils import (
     DroponeSessionStats,
     collect_dropone_plot_data,
+    load_forward_selected_neurons,
     load_dropone_session_stats,
     plot_dropone_suite,
 )
@@ -57,6 +61,11 @@ def main():
                     help="Only neurons with full DevExpl >= this threshold enter downstream analyses.")
     ap.add_argument("--features", type=str, default=",".join(DEFAULT_FEATURES),
                     help="Comma-separated feature names to plot; others are ignored.")
+    ap.add_argument(
+        "--forward_modulated_only",
+        action="store_true",
+        help="If set, per-feature neurons are restricted to those whose forward-search final model includes that feature.",
+    )
     args = ap.parse_args()
 
     features = [s.strip() for s in args.features.split(",") if s.strip()]
@@ -69,9 +78,18 @@ def main():
 
     sess_stats: List[DroponeSessionStats] = []
     for sess_dir in sorted([p for p in weights_base.iterdir() if p.is_dir()]):
-        st = load_dropone_session_stats(sess_dir, features=features)
+        whitelist = None
+        if args.forward_modulated_only:
+            whitelist = load_forward_selected_neurons(sess_dir, features=features)
+        st = load_dropone_session_stats(
+            sess_dir,
+            features=features,
+            feature_neuron_whitelist=whitelist,
+        )
         if st is not None:
             sess_stats.append(st)
+        elif args.forward_modulated_only:
+            print(f"[SKIP] {sess_dir.name}: no neurons matched forward-search filter for requested features.")
     if not sess_stats:
         raise SystemExit(f"[FATAL] No sessions found with valid drop-one stats under: {weights_base}")
 
