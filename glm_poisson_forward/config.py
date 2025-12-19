@@ -37,12 +37,11 @@ VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 
 # Discretization bins
 POSITION_CELL_CM = 8.0
-SPEED_N_BINS = 20
-ANGLE_N_BINS = 15  # roll/yaw/pitch bins
+SPEED_N_BINS = 15
+ANGLE_N_BINS = 36  # roll/yaw/pitch bins
 
 # Fitting-curve plots
 PLOT_SMOOTH_MS = 1000
 PLOT_START_SEC = 0.0
 PLOT_END_SEC = 600.0
 PLOT_ZSCORE = False
-
