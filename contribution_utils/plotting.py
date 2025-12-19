@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -80,6 +81,44 @@ def read_csv_dicts_safe(path: Path) -> List[dict]:
     return rows
 
 
+def load_forward_selected_neurons(session_dir: Path, features: Iterable[str]) -> Dict[str, set[int]]:
+    """
+    Parse forward-search outputs to find neurons whose final model includes each feature.
+    Returns a mapping: feature -> set(neuron_idx), where neuron_idx is zero-based.
+    """
+    feat_list = [str(f).strip() for f in features]
+    out: Dict[str, set[int]] = {f: set() for f in feat_list}
+
+    selected_csv = Path(session_dir) / "selected_models.csv"
+    rows = read_csv_dicts_safe(selected_csv)
+    if not rows:
+        return out
+
+    for r in rows:
+        neuron_name = str(r.get("neuron", "")).strip()
+        final_model = str(r.get("final_model", "")).strip()
+        if not neuron_name or not final_model:
+            continue
+
+        m = re.search(r"(\d+)$", neuron_name)
+        if not m:
+            continue
+        try:
+            ni = int(m.group(1)) - 1  # convert 1-based to 0-based
+        except Exception:
+            continue
+        if ni < 0:
+            continue
+
+        # forward search saves final_model as underscore-joined list (e.g., "Position_Speed")
+        model_feats = [s.strip() for s in final_model.replace(",", "_").split("_") if s.strip()]
+        for mf in model_feats:
+            if mf in out:
+                out[mf].add(ni)
+
+    return out
+
+
 # ----------------------------------------------------------------------
 # Loading + aggregation
 # ----------------------------------------------------------------------
@@ -92,7 +131,12 @@ def infer_group(session_name: str) -> Optional[str]:
     return None
 
 
-def load_dropone_session_stats(session_dir: Path, features: Iterable[str]) -> Optional[DroponeSessionStats]:
+def load_dropone_session_stats(
+    session_dir: Path,
+    features: Iterable[str],
+    *,
+    feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+) -> Optional[DroponeSessionStats]:
     session = Path(session_dir).name
     group = infer_group(session)
     if group is None:
@@ -106,6 +150,11 @@ def load_dropone_session_stats(session_dir: Path, features: Iterable[str]) -> Op
     if not contrib_rows:
         return None
     full_rows = read_csv_dicts_safe(full_csv)
+
+    feat_list = [str(f).strip() for f in features]
+    whitelist = None
+    if feature_neuron_whitelist is not None:
+        whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
 
     full_dev: Dict[int, float] = {}
     for r in full_rows:
@@ -121,12 +170,12 @@ def load_dropone_session_stats(session_dir: Path, features: Iterable[str]) -> Op
         if np.isfinite(val):
             full_dev[idx] = float(val)
 
-    feat_list = [str(f).strip() for f in features]
     frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
     for r in contrib_rows:
         feat = str(r.get("feature", "")).strip()
         if feat not in frac:
             continue
+        allowed = whitelist.get(feat, None) if whitelist is not None else None
         ni = r.get("neuron_idx", None)
         fv = r.get("frac_full_dev", r.get("frac", None))
         if ni is None or fv is None:
@@ -134,6 +183,8 @@ def load_dropone_session_stats(session_dir: Path, features: Iterable[str]) -> Op
         try:
             idx = int(float(str(ni).strip()))
         except Exception:
+            continue
+        if allowed is not None and idx not in allowed:
             continue
         val = _safe_float(fv)
         if np.isfinite(val):
