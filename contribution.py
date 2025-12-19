@@ -13,7 +13,8 @@ The heavy lifting (cell-metrics parsing, weight caching, statistics, plotting) l
    - fit/reuse Poisson GLM weights for the full model and each drop-one variant
    - compute neuron-level DevExpl and per-feature contribution fractions
 2) Aggregate across sessions with hierarchical bootstraps (indoor vs outdoor)
-3) Save summary plots and CSVs
+3) Save summary plots and CSVs, and write the drop-one boxplots (same logic as plot_contribution.py)
+   for neurons with full DevExpl >= MIN_FULL_DEVEXPL.
 """
 
 from __future__ import annotations
@@ -34,13 +35,16 @@ from contribution_utils import (
     CI_LO,
     DROPONE_FITS_DIRNAME,
     DROPONE_STATS_DIRNAME,
+    DroponeSessionStats,
     MU_EPS,
     N_BOOT,
     build_dayid_to_cellinfo,
+    collect_dropone_plot_data,
     devexpl_from_deviances,
     deviance_from_ll,
     hierarchical_bootstrap_mean,
     model_key_from_vars,
+    plot_dropone_suite,
     plot_summary_figure,
     poisson_loglik,
     poisson_loglik_saturated,
@@ -70,6 +74,9 @@ from glm_poisson_forward.io_utils import (
     rebuild_inputs_50hz,
     session_paths,
 )
+
+
+MIN_FULL_DEVEXPL = 0.1
 
 
 @dataclass
@@ -267,6 +274,36 @@ def main():
     if not results:
         print("[FATAL] No sessions processed successfully.")
         return
+
+    plot_stats = [
+        DroponeSessionStats(
+            session=r.session,
+            group=r.group,
+            full_devexpl=r.full_devexpl_by_neuron,
+            frac_by_feature=r.contrib_frac_by_feature_by_neuron,
+        )
+        for r in results
+    ]
+    dropone_plot_data = collect_dropone_plot_data(
+        plot_stats,
+        features=VARS_ALL,
+        min_full_devexpl=MIN_FULL_DEVEXPL,
+    )
+    summary_csv = plot_dropone_suite(
+        WEIGHTS_BASE / "DROPONE_SUMMARY",
+        features=VARS_ALL,
+        plot_data=dropone_plot_data,
+        min_full_devexpl=MIN_FULL_DEVEXPL,
+        seed=SEED,
+        max_scatter_points=0,
+        ylim_pad_frac=0.08,
+    )
+    print(
+        f"[OK] Drop-one boxplots (full DevExpl ≥ {MIN_FULL_DEVEXPL:g}): "
+        f"indoor {dropone_plot_data.kept_counts['indoor']}/{dropone_plot_data.total_counts['indoor']}, "
+        f"outdoor {dropone_plot_data.kept_counts['outdoor']}/{dropone_plot_data.total_counts['outdoor']}",
+    )
+    print(f"[OK] Summary CSV: {summary_csv}")
 
     for group in ["indoor", "outdoor"]:
         group_res = [r for r in results if r.group == group]
