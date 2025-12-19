@@ -39,20 +39,21 @@ Directory layout (inside each session folder under WEIGHTS_BASE):
       full_devexpl_pyr.csv
       dropone_contrib_pyr.csv
 
-You should edit the CONFIG section below to match your paths.
+All paths and binning parameters are shared with ``glm_poisson_forward.config`` to stay
+consistent with the forward-search pipeline.
 """
 
 from __future__ import annotations
 import faulthandler
 faulthandler.enable()
+import csv
 import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import h5py
 import numpy as np
 import pandas as pd
 import scipy.io
@@ -66,26 +67,32 @@ import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
 from sklearn.linear_model import PoissonRegressor
 from sklearn.model_selection import KFold
-from sklearn.preprocessing import OneHotEncoder
 from tqdm import tqdm
 
-from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple, Any
-import csv
-# ===============================
-# CONFIG (EDIT THESE)
-# ===============================
-
-# Input roots (same as your training script)
-IMU_ROOT      = Path(r"D:\Jiaqi\Projects\IMU_Preprocess\IMU_results")
-SPIKE_ROOT    = Path(r"D:\Jiaqi\Projects\GLM_File\spike_binary")
-DLC_ROOT      = Path(r"D:\Jiaqi\Projects\DLC_results_features")
-POSITION_ROOT = Path(r"D:\Jiaqi\Projects\ACC_DATA\DLC_Process\position_50hz")
-
-# Where your per-session GLM outputs live (the folder that contains session subfolders)
-# Example from your existing stats script:
-WEIGHTS_BASE = Path(r"../GLM_Poisson_Forward/weights_Poisson_forward")
-
+from glm_poisson_forward.config import (
+    CV_FOLDS,
+    DLC_ROOT,
+    IMU_ROOT,
+    MAX_ITER,
+    MAX_MISMATCH_FRAMES_50HZ,
+    N_JOBS,
+    POISSON_ALPHA,
+    POSITION_ROOT,
+    SEED,
+    SPIKE_ROOT,
+    VARS_ALL,
+    WEIGHTS_BASE,
+)
+from glm_poisson_forward.design_matrix import build_design_matrix
+from glm_poisson_forward.io_utils import (
+    list_sessions_dlc_final,
+    list_sessions_imu,
+    list_sessions_position,
+    list_sessions_spike,
+    load_spikes_50hz_counts,
+    rebuild_inputs_50hz,
+    session_paths,
+)
 
 # Where to search for cell_metrics/cellinfo mats (same logic as your pyramidal-only stats script)
 DAY_SEARCH_DIRS = [
@@ -107,28 +114,6 @@ DAY_SEARCH_DIRS = [
 ]
 DAY_SEARCH_DIRS = [Path(p) for p in DAY_SEARCH_DIRS]
 
-# Parallel / CV
-N_JOBS   = 18
-SEED     = 0
-CV_FOLDS = 10
-
-# PoissonRegressor params (align with your training)
-MAX_ITER = 500
-POISSON_ALPHA = 1e-6
-
-# Binning / design matrix (align with your training)
-VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
-POSITION_CELL_CM = 8.0
-SPEED_N_BINS = 20
-ANGLE_N_BINS = 15  # roll/yaw/pitch bins
-
-# Frequency / binning of spikes
-BIN_MS   = 20
-FS_HZ    = 50.0
-BASE_FS  = 200.0
-AGG_FACTOR = int(BASE_FS / FS_HZ)  # 4
-MAX_MISMATCH_FRAMES_50HZ = 5
-
 # Output subfolders inside each session directory
 DROPONE_FITS_DIRNAME  = "DROPONE_FITS"
 DROPONE_STATS_DIRNAME = "DROPONE_STATS"
@@ -139,55 +124,6 @@ CI_LO, CI_HI = 5, 95
 
 # Numerical safety
 MU_EPS = 1e-12
-
-
-# ===============================
-# Session discovery
-# ===============================
-
-def list_sessions_imu(root: Path) -> set[str]:
-    if not root.exists():
-        return set()
-    out = set()
-    for sess_dir in root.iterdir():
-        if not sess_dir.is_dir():
-            continue
-        stem = sess_dir.name
-        f = sess_dir / f"{stem}_IMU_features.csv"
-        if f.exists():
-            out.add(stem)
-    return out
-
-def list_sessions_spike(root: Path) -> set[str]:
-    if not root.exists():
-        return set()
-    return {f.stem.replace("_200Hz", "") for f in root.glob("*_200Hz.h5")}
-
-def list_sessions_dlc_final(root: Path) -> set[str]:
-    if not root.exists():
-        return set()
-    out = set()
-    for sess_dir in root.iterdir():
-        if not sess_dir.is_dir():
-            continue
-        stem = sess_dir.name
-        f = sess_dir / f"final_filtered_{stem}_50hz.csv"
-        if f.exists():
-            out.add(stem)
-    return out
-
-def list_sessions_position(root: Path) -> set[str]:
-    if not root.exists():
-        return set()
-    return {s.stem.replace("positions_", "") for s in root.glob("positions_*.csv")}
-
-def session_paths(session: str) -> Dict[str, Path]:
-    return {
-        "imu":       IMU_ROOT / session / f"{session}_IMU_features.csv",
-        "spike":     SPIKE_ROOT / f"{session}_200Hz.h5",
-        "dlc_final": DLC_ROOT / session / f"final_filtered_{session}_50hz.csv",
-        "position":  POSITION_ROOT / f"positions_{session}.csv",
-    }
 
 
 # ===============================
@@ -260,85 +196,6 @@ def pyramidal_indices_for_session(session: str, dayid2cellinfo: Dict[str, Path],
     return idx
 
 
-# ===============================
-# Discretization & design matrix
-# ===============================
-
-def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
-    vals = np.asarray(vals, dtype=np.float32)
-    if vmin is None:
-        vmin = np.nanmin(vals)
-    if vmax is None:
-        vmax = np.nanmax(vals)
-    edges = np.linspace(vmin, vmax, n_bins + 1, dtype=np.float32)
-    out = np.digitize(vals, edges) - 1
-    out = np.clip(out, 0, n_bins - 1)
-    return out.astype(np.int32)
-
-def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
-    cell = float(POSITION_CELL_CM)
-    x_bin = (np.asarray(head_x_cm, dtype=np.float32) // cell).astype(int)
-    y_bin = (np.asarray(head_y_cm, dtype=np.float32) // cell).astype(int)
-
-    uniq = (
-        pd.DataFrame({"x_bin": x_bin, "y_bin": y_bin})
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
-    uniq["pos_idx"] = np.arange(len(uniq), dtype=int)
-
-    pos_idx = (
-        pd.DataFrame({"x_bin": x_bin, "y_bin": y_bin})
-        .merge(uniq, on=["x_bin", "y_bin"], how="left")["pos_idx"]
-        .to_numpy(dtype=np.int32)
-    )
-    return pos_idx, int(uniq.shape[0])
-
-def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarray]) -> Tuple[sparse.csr_matrix, List[str]]:
-    cols, cats, order = [], [], []
-
-    if "Position" in selected_vars:
-        cols.append(data_dict["position"].astype(np.int32))
-        cats.append(np.arange(data_dict["n_pos"], dtype=int))
-        order.append("position")
-
-    if "Speed" in selected_vars:
-        cols.append(data_dict["head_v_bin"].astype(np.int32))
-        cats.append(np.arange(SPEED_N_BINS, dtype=int))
-        order.append("head_v")
-
-    for ang in ["roll", "yaw", "pitch"]:
-        if ang in selected_vars:
-            cols.append(data_dict[f"{ang}_bin"].astype(np.int32))
-            cats.append(np.arange(ANGLE_N_BINS, dtype=int))
-            order.append(ang)
-
-    if len(cols) == 0:
-        X_zero = sparse.csr_matrix((len(data_dict["position"]), 0), dtype=np.float32)
-        return X_zero, ["intercept"]
-
-    cat_df = pd.DataFrame({name: col for name, col in zip(order, cols)})
-
-    try:
-        encoder = OneHotEncoder(
-            categories=cats,
-            sparse_output=True,
-            handle_unknown="ignore",
-            drop="first",
-        )
-    except TypeError:
-        encoder = OneHotEncoder(
-            categories=cats,
-            sparse=True,
-            handle_unknown="ignore",
-            drop="first",
-        )
-
-    X_cat = encoder.fit_transform(cat_df).astype(np.float32).tocsr()
-    feat_cat = encoder.get_feature_names_out(order).tolist()
-    feature_names = feat_cat + ["intercept"]
-    return X_cat, feature_names
-
 def model_key_from_vars(model_vars: List[str]) -> str:
     if model_vars == VARS_ALL:
         return "FULL"
@@ -361,60 +218,6 @@ def load_feature_names_file(model_dir: Path) -> Optional[List[str]]:
         return None
     with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-# ===============================
-# Load spikes & covariates (50 Hz)
-# ===============================
-
-def load_spikes_50hz_counts(h5_path: Path) -> np.ndarray:
-    with h5py.File(h5_path, "r") as hf:
-        Y200 = hf["spike_binary"][:].astype(np.int16)  # (T200, N)
-    T200, N = Y200.shape
-    T200_trim = (T200 // AGG_FACTOR) * AGG_FACTOR
-    if T200_trim <= 0:
-        raise ValueError("Spike length too short after trimming.")
-    Y200 = Y200[:T200_trim]
-    Y50 = Y200.reshape(-1, AGG_FACTOR, N).sum(axis=1)  # (T50, N)
-    return Y50.astype(np.int32)
-
-def rebuild_inputs_50hz(session: str, paths: Dict[str, Path]) -> Dict[str, np.ndarray]:
-    pos_df = pd.read_csv(paths["position"], usecols=["head_x", "head_y", "heading_deg"]).astype(np.float32)
-    dlc_df = pd.read_csv(paths["dlc_final"], usecols=["head_v"]).astype(np.float32)
-    imu_df = pd.read_csv(paths["imu"], usecols=["roll", "yaw", "pitch"]).astype(np.float32)
-
-    yaw_rad = np.deg2rad(pos_df["heading_deg"].to_numpy(dtype=np.float32)).astype(np.float32)
-
-    L = min(len(pos_df), len(dlc_df), len(imu_df), len(yaw_rad))
-    pos_df = pos_df.iloc[:L].reset_index(drop=True)
-    dlc_df = dlc_df.iloc[:L].reset_index(drop=True)
-    imu_df = imu_df.iloc[:L].reset_index(drop=True)
-    yaw_rad = yaw_rad[:L]
-
-    # override yaw with heading (as in your training code)
-    imu_df["yaw"] = yaw_rad
-
-    # match your training normalization conventions
-    imu_df["yaw"] = np.mod(imu_df["yaw"].values, 2 * np.pi)
-    imu_df["pitch"] = imu_df["pitch"].values + (np.pi / 2)
-    imu_df["roll"] = np.mod(imu_df["roll"].values, 2 * np.pi)
-
-    pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
-
-    head_v_bin = bin_col(dlc_df["head_v"].values, n_bins=SPEED_N_BINS)
-    roll_bin   = bin_col(imu_df["roll"].values,  n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin    = bin_col(imu_df["yaw"].values,   n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin  = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=np.pi)
-
-    return {
-        "T": int(L),
-        "position": pos_idx.astype(np.int32),
-        "n_pos": int(n_pos),
-        "head_v_bin": head_v_bin.astype(np.int32),
-        "roll_bin": roll_bin.astype(np.int32),
-        "yaw_bin": yaw_bin.astype(np.int32),
-        "pitch_bin": pitch_bin.astype(np.int32),
-    }
 
 
 # ===============================
