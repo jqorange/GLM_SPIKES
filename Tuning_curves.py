@@ -51,6 +51,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from glm_poisson_forward.config import ANGLE_N_BINS, BIN_MS, SPEED_N_BINS
 
 # =========================
 # CONFIG (EDIT AS NEEDED)
@@ -79,15 +80,13 @@ OUTDOOR_SUFFIX = "_outdoor"
 # Output directory
 OUT_DIR = WEIGHTS_ROOT / "plots_tuning_FULL_FIT_coef_only"
 
-# Bin settings (must match training)
-BIN_MS = 20
+# Bin settings (match forward-search/training)
 BIN_SEC = BIN_MS / 1000.0
 
-# Angle bins/ranges consistent with your preprocessing
-ANGLE_N_BINS = 15
+SPEED_RANGE = (0.0, 1.5)
 ROLL_RANGE = (0.0, 2.0 * math.pi)
 YAW_RANGE = (0.0, 2.0 * math.pi)
-PITCH_RANGE = (0.0, math.pi)
+PITCH_RANGE = (0.0, 2.0 * math.pi)
 
 # Smoothing (in bins). Set None/0 to disable.
 SMOOTH_SIGMA_BINS: float | None = 1.5
@@ -162,19 +161,20 @@ def _x_axis_for_var(var: str, K: int) -> Tuple[np.ndarray, str]:
     """
     We do NOT have per-session speed edges anymore (no raw data).
     So:
-      - Speed: x = bin index [0..K-1]
+      - Speed: linear bins on [0, 1.5] like training (centers)
       - roll/yaw: degrees centers in [0..360)
-      - pitch: degrees centers in [0..180]
+      - pitch: degrees centers in [0..360)
     """
     if var == "Speed":
-        x = np.arange(K, dtype=np.float64)
-        return x, "Speed bin index (0..K-1)"
+        edges = np.linspace(SPEED_RANGE[0], SPEED_RANGE[1], K + 1, dtype=np.float64)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        return centers, "Speed bin center (m/s)"
     if var in {"roll", "yaw"}:
-        edges = np.linspace(0.0, 2.0 * math.pi, K + 1, dtype=np.float64)
+        edges = np.linspace(ROLL_RANGE[0], ROLL_RANGE[1], K + 1, dtype=np.float64)
         centers = 0.5 * (edges[:-1] + edges[1:])
         return np.rad2deg(centers), f"{var} bin center (deg)"
     if var == "pitch":
-        edges = np.linspace(0.0, math.pi, K + 1, dtype=np.float64)
+        edges = np.linspace(PITCH_RANGE[0], PITCH_RANGE[1], K + 1, dtype=np.float64)
         centers = 0.5 * (edges[:-1] + edges[1:])
         return np.rad2deg(centers), "pitch bin center (deg)"
     raise ValueError(f"Unsupported var for x-axis: {var}")
@@ -421,7 +421,12 @@ def _compute_curve_rate(var: str, intercept: float, effects: Dict[str, np.ndarra
     eff = effects.get(var, None)
     if eff is None:
         # var absent -> flat curve
-        eff = np.zeros(ANGLE_N_BINS if var in {"roll", "yaw", "pitch"} else 1, dtype=np.float64)
+        if var == "Speed":
+            eff = np.zeros(SPEED_N_BINS, dtype=np.float64)
+        elif var in {"roll", "yaw", "pitch"}:
+            eff = np.zeros(ANGLE_N_BINS, dtype=np.float64)
+        else:
+            eff = np.zeros(1, dtype=np.float64)
 
     base_eta = _baseline_eta(intercept, effects, target_var=var)
     eta = base_eta + eff
