@@ -1,0 +1,31 @@
+from pathlib import Path
+
+# Where to search for cell_metrics/cellinfo mats (same logic as the pyramidal-only stats script)
+DAY_SEARCH_DIRS = [
+    Path(r"W:\data\FieldRat\2024\F4\day1"),
+    Path(r"W:\data\FieldRat\2024\F4\day4"),
+    Path(r"W:\data\FieldRat\2024\F5\Merged\day2\121_day2"),
+    Path(r"W:\data\FieldRat\2024\F5\Merged\day3\121_day3"),
+    Path(r"W:\data\FieldRat\2024\F5\Merged\day5\121_day5"),
+    Path(r"W:\data\FieldRat\2024\F5\Merged\day6\3E6_day6"),
+    Path(r"W:\data\FieldRat\2024\F5\Merged\day10\121_day10"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day3\3E6_day3"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day5\3E6_day5"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day8\3E6_day8"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day9\3E6_day9"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day10\3E6_day10"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day2\3E6_day2"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day4\3E6_day4"),
+    Path(r"W:\data\FieldRat\2024\F6\Merged\day6\121_day6"),
+]
+
+# Output subfolders inside each session directory
+DROPONE_FITS_DIRNAME = "DROPONE_FITS"
+DROPONE_STATS_DIRNAME = "DROPONE_STATS"
+
+# Bootstrap settings
+N_BOOT = 2000
+CI_LO, CI_HI = 5, 95
+
+# Numerical safety
+MU_EPS = 1e-12
