@@ -19,7 +19,16 @@ from .constants import (
     MU_EPS,
     N_BOOT,
 )
-from .plotting import plot_summary_figure
+from .plotting import (
+    DroponePlotData,
+    DroponeSessionStats,
+    collect_dropone_plot_data,
+    infer_group,
+    load_dropone_session_stats,
+    plot_dropone_suite,
+    plot_summary_figure,
+    suffix_for_threshold,
+)
 from .stats import (
     devexpl_from_deviances,
     deviance_from_ll,
@@ -52,6 +61,13 @@ __all__ = [
     "MU_EPS",
     "N_BOOT",
     "plot_summary_figure",
+    "DroponePlotData",
+    "DroponeSessionStats",
+    "collect_dropone_plot_data",
+    "infer_group",
+    "load_dropone_session_stats",
+    "plot_dropone_suite",
+    "suffix_for_threshold",
     "devexpl_from_deviances",
     "deviance_from_ll",
     "hierarchical_bootstrap_mean",
