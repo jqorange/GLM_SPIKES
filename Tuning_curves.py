@@ -479,6 +479,55 @@ def _plot_one_var(session_id: str, neuron: str, var: str,
     plt.savefig(out_png, dpi=200)
     plt.close()
 
+    if var in {"roll", "yaw", "pitch"}:
+        def _close_curve(theta_deg: np.ndarray, r: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            theta_rad = np.deg2rad(theta_deg)
+            return np.concatenate([theta_rad, theta_rad[:1]]), np.concatenate([r, r[:1]])
+
+        def _polar_plot(theta_deg: np.ndarray, r: np.ndarray, label: str, out_path: Path,
+                        color: str | None = None) -> None:
+            theta_c, r_c = _close_curve(theta_deg, r)
+            plt.figure(figsize=(5.5, 5.5))
+            ax = plt.subplot(111, projection="polar")
+            line_kwargs = {"linewidth": 2}
+            if color:
+                line_kwargs["color"] = color
+            ax.plot(theta_c, r_c, label=label, **line_kwargs)
+            ax.fill(theta_c, r_c, alpha=0.25, color=line_kwargs.get("color", None))
+            ax.set_title(f"{session_id} | {neuron} | {var} ({label})")
+            ax.legend(loc="upper right", bbox_to_anchor=(1.1, 1.1))
+            plt.tight_layout()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(out_path, dpi=200)
+            plt.close()
+
+        theta_i = xi
+        theta_o = xo
+
+        _polar_plot(theta_i, curve_i, "Indoor (FULL_FIT)",
+                    OUT_DIR / session_id / neuron / f"tuning_FULL_FIT_{var}_polar_indoor.png",
+                    color="#1f77b4")
+        _polar_plot(theta_o, curve_o, "Outdoor (FULL_FIT)",
+                    OUT_DIR / session_id / neuron / f"tuning_FULL_FIT_{var}_polar_outdoor.png",
+                    color="#ff7f0e")
+
+        theta_i_c, r_i_c = _close_curve(theta_i, curve_i)
+        theta_o_c, r_o_c = _close_curve(theta_o, curve_o)
+
+        plt.figure(figsize=(6.0, 6.0))
+        ax = plt.subplot(111, projection="polar")
+        ax.plot(theta_i_c, r_i_c, label="Indoor (FULL_FIT)", linewidth=2, color="#1f77b4")
+        ax.fill(theta_i_c, r_i_c, alpha=0.22, color="#1f77b4")
+        ax.plot(theta_o_c, r_o_c, label="Outdoor (FULL_FIT)", linewidth=2, color="#ff7f0e", alpha=0.95)
+        ax.fill(theta_o_c, r_o_c, alpha=0.2, color="#ff7f0e")
+        ax.set_title(f"{session_id} | {neuron} | {var} (Indoor vs Outdoor)")
+        ax.legend(loc="upper right", bbox_to_anchor=(1.1, 1.1))
+        plt.tight_layout()
+        out_png_polar = OUT_DIR / session_id / neuron / f"tuning_FULL_FIT_{var}_polar_indoor_vs_outdoor.png"
+        out_png_polar.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_png_polar, dpi=200)
+        plt.close()
+
 
 def _process_one_row(session_id: str, neuron: str, diff_str: str) -> Optional[str]:
     try:
