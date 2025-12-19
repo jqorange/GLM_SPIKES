@@ -112,15 +112,15 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     imu_df["yaw"] = yaw_rad
 
     imu_df["yaw"] = np.mod(imu_df["yaw"].values, 2 * np.pi)
-    imu_df["pitch"] = imu_df["pitch"].values + (np.pi / 2)
+    imu_df["pitch"] = np.mod(imu_df["pitch"].values, 2 * np.pi)
     imu_df["roll"] = np.mod(imu_df["roll"].values, 2 * np.pi)
 
     pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
-    head_v_bin = bin_col(dlc_df["head_v"].values, n_bins=SPEED_N_BINS)
+    head_v_bin = bin_col(dlc_df["head_v"].values, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
     roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=np.pi)
+    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
 
     return {
         "T": int(L),
