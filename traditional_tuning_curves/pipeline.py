@@ -1,20 +1,50 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .config import OUT_ROOT, PERCENTILE, PLOT_MAX_NEURONS, SHUFFLE_N
+from .config import N_WORKERS, OUT_ROOT, PERCENTILE, PLOT_MAX_NEURONS, SHUFFLE_N
 from .io_utils import list_sessions_all, load_session_raw
 from .plotting import binning_note, plot_neuron_summary
-from .tuning_scores import SessionBinning, TuningInputs, compute_scores_for_neuron, compute_shuffle_scores, build_bins
+from .tuning_scores import (
+    ScoreResult,
+    SessionBinning,
+    TuningInputs,
+    compute_scores_for_neuron,
+    compute_shuffle_scores,
+    build_bins,
+)
 
 
 def _write_lines(path: Path, lines):
     with open(path, "w", encoding="utf-8") as f:
         for s in lines:
             f.write(s + ("\n" if not str(s).endswith("\n") else ""))
+
+
+_WORKER_INPUTS: TuningInputs | None = None
+_WORKER_BINS: SessionBinning | None = None
+_WORKER_N_SHUFFLE: int = 0
+
+
+def _init_worker(inputs: TuningInputs, bins: SessionBinning, n_shuffle: int) -> None:
+    global _WORKER_INPUTS, _WORKER_BINS, _WORKER_N_SHUFFLE
+    _WORKER_INPUTS = inputs
+    _WORKER_BINS = bins
+    _WORKER_N_SHUFFLE = n_shuffle
+
+
+def _process_neuron(args: tuple[int, int]) -> tuple[int, ScoreResult, dict[str, np.ndarray], dict[str, np.ndarray]]:
+    neuron_idx, seed = args
+    if _WORKER_INPUTS is None or _WORKER_BINS is None:
+        raise RuntimeError("Worker not initialized with inputs and bins.")
+    rng = np.random.default_rng(seed=seed)
+    scores, aux = compute_scores_for_neuron(_WORKER_INPUTS, _WORKER_BINS, neuron_idx)
+    shuffle_scores = compute_shuffle_scores(_WORKER_INPUTS, _WORKER_BINS, neuron_idx, _WORKER_N_SHUFFLE, rng)
+    return neuron_idx, scores, aux, shuffle_scores
 
 
 def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
@@ -34,56 +64,111 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
     session_dir.mkdir(parents=True, exist_ok=True)
     binning_note(session_dir / "binning_notes.txt")
 
-    rng = np.random.default_rng(seed=0)
     n_neurons = inputs.spikes.shape[1]
     rows = []
+    seed_seq = np.random.SeedSequence(0)
+    seeds = [int(s.generate_state(1)[0]) for s in seed_seq.spawn(n_neurons)]
 
-    for n_idx in range(n_neurons):
-        scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
-        shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
+    if N_WORKERS > 1 and n_neurons > 1:
+        tasks = [(idx, seeds[idx]) for idx in range(n_neurons)]
+        with ProcessPoolExecutor(
+            max_workers=N_WORKERS,
+            initializer=_init_worker,
+            initargs=(inputs, bins, n_shuffle),
+        ) as executor:
+            results = executor.map(_process_neuron, tasks)
+            iterable = results
+            for n_idx, scores, aux, shuffle_scores in iterable:
+                thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
 
-        thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
+                row = {
+                    "neuron": n_idx,
+                    "grid_score": scores.grid_score,
+                    "border_score": scores.border_score,
+                    "hd_score": scores.hd_score,
+                    "roll_score": scores.roll_score,
+                    "pitch_score": scores.pitch_score,
+                    "speed_score": scores.speed_score,
+                    "speed_stability": scores.speed_stability,
+                    "spatial_stability": scores.spatial_stability,
+                    "angular_stability": scores.angular_stability,
+                    "roll_stability": scores.roll_stability,
+                    "pitch_stability": scores.pitch_stability,
+                    "grid_thresh": thresholds.get("grid_score"),
+                    "border_thresh": thresholds.get("border_score"),
+                    "hd_thresh": thresholds.get("hd_score"),
+                    "roll_thresh": thresholds.get("roll_score"),
+                    "pitch_thresh": thresholds.get("pitch_score"),
+                    "speed_thresh": thresholds.get("speed_score"),
+                    "speed_stab_thresh": thresholds.get("speed_stability"),
+                }
 
-        row = {
-            "neuron": n_idx,
-            "grid_score": scores.grid_score,
-            "border_score": scores.border_score,
-            "hd_score": scores.hd_score,
-            "roll_score": scores.roll_score,
-            "pitch_score": scores.pitch_score,
-            "speed_score": scores.speed_score,
-            "speed_stability": scores.speed_stability,
-            "spatial_stability": scores.spatial_stability,
-            "angular_stability": scores.angular_stability,
-            "roll_stability": scores.roll_stability,
-            "pitch_stability": scores.pitch_stability,
-            "grid_thresh": thresholds.get("grid_score"),
-            "border_thresh": thresholds.get("border_score"),
-            "hd_thresh": thresholds.get("hd_score"),
-            "roll_thresh": thresholds.get("roll_score"),
-            "pitch_thresh": thresholds.get("pitch_score"),
-            "speed_thresh": thresholds.get("speed_score"),
-            "speed_stab_thresh": thresholds.get("speed_stability"),
-        }
+                row["is_grid"] = row["grid_score"] > row["grid_thresh"]
+                row["is_border"] = row["border_score"] > row["border_thresh"]
+                row["is_hd"] = row["hd_score"] > row["hd_thresh"]
+                row["is_roll"] = row["roll_score"] > row["roll_thresh"]
+                row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
+                row["is_speed"] = (row["speed_score"] > row["speed_thresh"]) and (
+                    row["speed_stability"] > row["speed_stab_thresh"]
+                )
 
-        row["is_grid"] = row["grid_score"] > row["grid_thresh"]
-        row["is_border"] = row["border_score"] > row["border_thresh"]
-        row["is_hd"] = row["hd_score"] > row["hd_thresh"]
-        row["is_roll"] = row["roll_score"] > row["roll_thresh"]
-        row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
-        row["is_speed"] = (row["speed_score"] > row["speed_thresh"]) and (
-            row["speed_stability"] > row["speed_stab_thresh"]
-        )
+                rows.append(row)
 
-        rows.append(row)
+                if n_idx < PLOT_MAX_NEURONS:
+                    plot_neuron_summary(
+                        session_dir / "plots",
+                        n_idx,
+                        row,
+                        aux,
+                    )
+    else:
+        rng = np.random.default_rng(seed=0)
+        for n_idx in range(n_neurons):
+            scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
+            shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
 
-        if n_idx < PLOT_MAX_NEURONS:
-            plot_neuron_summary(
-                session_dir / "plots" / f"neuron_{n_idx:03d}.png",
-                n_idx,
-                row,
-                aux,
+            thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
+
+            row = {
+                "neuron": n_idx,
+                "grid_score": scores.grid_score,
+                "border_score": scores.border_score,
+                "hd_score": scores.hd_score,
+                "roll_score": scores.roll_score,
+                "pitch_score": scores.pitch_score,
+                "speed_score": scores.speed_score,
+                "speed_stability": scores.speed_stability,
+                "spatial_stability": scores.spatial_stability,
+                "angular_stability": scores.angular_stability,
+                "roll_stability": scores.roll_stability,
+                "pitch_stability": scores.pitch_stability,
+                "grid_thresh": thresholds.get("grid_score"),
+                "border_thresh": thresholds.get("border_score"),
+                "hd_thresh": thresholds.get("hd_score"),
+                "roll_thresh": thresholds.get("roll_score"),
+                "pitch_thresh": thresholds.get("pitch_score"),
+                "speed_thresh": thresholds.get("speed_score"),
+                "speed_stab_thresh": thresholds.get("speed_stability"),
+            }
+
+            row["is_grid"] = row["grid_score"] > row["grid_thresh"]
+            row["is_border"] = row["border_score"] > row["border_thresh"]
+            row["is_hd"] = row["hd_score"] > row["hd_thresh"]
+            row["is_roll"] = row["roll_score"] > row["roll_thresh"]
+            row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
+            row["is_speed"] = (row["speed_score"] > row["speed_thresh"]) and (
+                row["speed_stability"] > row["speed_stab_thresh"]
             )
+
+            rows.append(row)
+
+            if n_idx < PLOT_MAX_NEURONS:
+                plot_neuron_summary(
+                    session_dir / "plots",
+                    n_idx,
+                    row,
+                    aux,
+                )
 
     df = pd.DataFrame(rows)
     out_csv = session_dir / "tuning_scores.csv"

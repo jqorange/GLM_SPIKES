@@ -266,12 +266,11 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
 
+    rate = np.nan_to_num(rate, nan=0.0)
     bin_deg = 360.0 / ANGLE_N_BINS
-    win_bins = max(1, int(round(HD_SMOOTH_DEG / bin_deg)))
-    if win_bins > 1:
-        kernel = np.ones(win_bins, dtype=np.float64) / float(win_bins)
-        rate_padded = np.concatenate([rate[-win_bins:], rate, rate[:win_bins]])
-        rate_smooth = np.convolve(rate_padded, kernel, mode="same")[win_bins:-win_bins]
+    sigma_bins = HD_SMOOTH_DEG / bin_deg
+    if sigma_bins > 0:
+        rate_smooth = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="wrap")
     else:
         rate_smooth = rate
 
@@ -314,6 +313,10 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
     rate = np.full(SPEED_N_BINS, np.nan, dtype=np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
+    rate = np.nan_to_num(rate, nan=0.0)
+    sigma_bins = SPEED_SMOOTH_MS / (BIN_SEC * 1000.0)
+    if sigma_bins > 0:
+        rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
     return rate
 
 
