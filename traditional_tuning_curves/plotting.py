@@ -10,7 +10,8 @@ from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_B
 
 
 def _plot_rate_map(ax, rate_map: np.ndarray) -> None:
-    im = ax.imshow(rate_map, origin="lower", cmap="viridis")
+    display = np.nan_to_num(rate_map, nan=0.0)
+    im = ax.imshow(display, origin="lower", cmap="viridis")
     ax.set_title("Spatial rate map (Hz)")
     ax.set_xlabel("X bin")
     ax.set_ylabel("Y bin")
@@ -28,7 +29,7 @@ def _plot_autocorr(ax, autocorr: np.ndarray) -> None:
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
     edges = np.linspace(0.0, 1.5, SPEED_N_BINS + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    ax.plot(centers, speed_curve, color="tab:green")
+    ax.plot(centers, np.nan_to_num(speed_curve, nan=0.0), color="tab:green")
     ax.set_title("Speed tuning")
     ax.set_xlabel("Speed (m/s)")
     ax.set_ylabel("Rate (Hz)")
@@ -36,7 +37,8 @@ def _plot_speed(ax, speed_curve: np.ndarray) -> None:
 
 def _close_curve(theta_deg: np.ndarray, r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     theta_rad = np.deg2rad(theta_deg)
-    return np.concatenate([theta_rad, theta_rad[:1]]), np.concatenate([r, r[:1]])
+    r_safe = np.nan_to_num(r, nan=0.0)
+    return np.concatenate([theta_rad, theta_rad[:1]]), np.concatenate([r_safe, r_safe[:1]])
 
 
 def plot_polar_curve(out_path: Path, theta_deg: np.ndarray, r: np.ndarray, title: str, color: str) -> None:
@@ -50,6 +52,24 @@ def plot_polar_curve(out_path: Path, theta_deg: np.ndarray, r: np.ndarray, title
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=200)
     plt.close()
+
+
+def plot_speed_curve(out_path: Path, speed_curve: np.ndarray) -> None:
+    fig, ax = plt.subplots(figsize=(6.0, 4.5))
+    _plot_speed(ax, speed_curve)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_position_map(out_path: Path, rate_map: np.ndarray) -> None:
+    fig, ax = plt.subplots(figsize=(6.0, 5.5))
+    _plot_rate_map(ax, rate_map)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def plot_neuron_summary(
@@ -90,22 +110,30 @@ def plot_neuron_summary(
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
+    plot_position_map(
+        out_path.parent / "position" / f"neuron_{neuron_idx:03d}_position_map.png",
+        aux["rate_map"],
+    )
+    plot_speed_curve(
+        out_path.parent / "speed" / f"neuron_{neuron_idx:03d}_speed_curve.png",
+        aux["speed_curve"],
+    )
     plot_polar_curve(
-        out_path.parent / f"neuron_{neuron_idx:03d}_yaw_polar.png",
+        out_path.parent / "yaw" / f"neuron_{neuron_idx:03d}_yaw_polar.png",
         theta_deg,
         aux["hd_curve"],
         f"Neuron {neuron_idx} | yaw tuning",
         color="#1f77b4",
     )
     plot_polar_curve(
-        out_path.parent / f"neuron_{neuron_idx:03d}_roll_polar.png",
+        out_path.parent / "roll" / f"neuron_{neuron_idx:03d}_roll_polar.png",
         theta_deg,
         aux["roll_curve"],
         f"Neuron {neuron_idx} | roll tuning",
         color="#ff7f0e",
     )
     plot_polar_curve(
-        out_path.parent / f"neuron_{neuron_idx:03d}_pitch_polar.png",
+        out_path.parent / "pitch" / f"neuron_{neuron_idx:03d}_pitch_polar.png",
         theta_deg,
         aux["pitch_curve"],
         f"Neuron {neuron_idx} | pitch tuning",

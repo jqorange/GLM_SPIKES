@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -15,6 +17,21 @@ def _write_lines(path: Path, lines):
     with open(path, "w", encoding="utf-8") as f:
         for s in lines:
             f.write(s + ("\n" if not str(s).endswith("\n") else ""))
+
+
+def _process_neuron(args):
+    inputs, bins, n_idx, n_shuffle, seed, include_aux = args
+    scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
+    rng = np.random.default_rng(seed=seed)
+    shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
+    if not include_aux:
+        aux = {}
+    return n_idx, scores, aux, shuffle_scores
+
+
+def _default_workers() -> int:
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count - 1)
 
 
 def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
@@ -34,14 +51,21 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
     session_dir.mkdir(parents=True, exist_ok=True)
     binning_note(session_dir / "binning_notes.txt")
 
-    rng = np.random.default_rng(seed=0)
     n_neurons = inputs.spikes.shape[1]
     rows = []
+    worker_count = _default_workers()
+    tasks = [
+        (inputs, bins, n_idx, n_shuffle, 1000 + n_idx, n_idx < PLOT_MAX_NEURONS)
+        for n_idx in range(n_neurons)
+    ]
 
-    for n_idx in range(n_neurons):
-        scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
-        shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
+    if worker_count > 1:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results = executor.map(_process_neuron, tasks)
+    else:
+        results = map(_process_neuron, tasks)
 
+    for n_idx, scores, aux, shuffle_scores in results:
         thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
 
         row = {
@@ -77,7 +101,7 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
 
         rows.append(row)
 
-        if n_idx < PLOT_MAX_NEURONS:
+        if n_idx < PLOT_MAX_NEURONS and aux:
             plot_neuron_summary(
                 session_dir / "plots" / f"neuron_{n_idx:03d}.png",
                 n_idx,

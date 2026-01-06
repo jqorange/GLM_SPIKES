@@ -12,11 +12,13 @@ from glm_poisson_forward.design_matrix import bin_col
 from .config import (
     ADAPTIVE_SMOOTH_ALPHA,
     BIN_SEC,
+    CURVE_SMOOTH_SIGMA_BINS,
     HD_SMOOTH_DEG,
     SHUFFLE_MIN_SEC,
     SPEED_MAX_M_S,
     SPEED_MIN_M_S,
     SPEED_SMOOTH_MS,
+    SPATIAL_SMOOTH_SIGMA_BINS,
 )
 
 
@@ -120,6 +122,13 @@ def rate_map_2d(
     rate_map = np.full_like(occupancy_sec, np.nan, dtype=np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
         rate_map[occupancy_sec > 0] = spike_map[occupancy_sec > 0] / occupancy_sec[occupancy_sec > 0]
+    if SPATIAL_SMOOTH_SIGMA_BINS > 0:
+        smooth_rate = ndimage.gaussian_filter(np.nan_to_num(rate_map, nan=0.0), SPATIAL_SMOOTH_SIGMA_BINS)
+        smooth_occ = ndimage.gaussian_filter(occupancy_sec, SPATIAL_SMOOTH_SIGMA_BINS)
+        smoothed = np.full_like(rate_map, np.nan, dtype=np.float64)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            smoothed[smooth_occ > 0] = smooth_rate[smooth_occ > 0] / smooth_occ[smooth_occ > 0]
+        rate_map = smoothed
     return rate_map, occupancy_sec
 
 
@@ -274,6 +283,10 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
         rate_smooth = np.convolve(rate_padded, kernel, mode="same")[win_bins:-win_bins]
     else:
         rate_smooth = rate
+    if CURVE_SMOOTH_SIGMA_BINS > 0:
+        rate_padded = np.concatenate([rate_smooth, rate_smooth, rate_smooth])
+        padded = ndimage.gaussian_filter1d(rate_padded, CURVE_SMOOTH_SIGMA_BINS, mode="nearest")
+        rate_smooth = padded[ANGLE_N_BINS : 2 * ANGLE_N_BINS]
 
     angles = np.linspace(0.0, 2 * np.pi, ANGLE_N_BINS, endpoint=False)
     weights = np.nan_to_num(rate_smooth, nan=0.0)
@@ -314,6 +327,8 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
     rate = np.full(SPEED_N_BINS, np.nan, dtype=np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
+    if CURVE_SMOOTH_SIGMA_BINS > 0:
+        rate = ndimage.gaussian_filter1d(np.nan_to_num(rate, nan=0.0), CURVE_SMOOTH_SIGMA_BINS, mode="nearest")
     return rate
 
 
