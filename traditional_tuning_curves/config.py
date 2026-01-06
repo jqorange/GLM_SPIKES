@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from glm_poisson_forward.config import BIN_MS
@@ -21,6 +22,9 @@ ADAPTIVE_SMOOTH_ALPHA = 200.0
 
 # Plotting
 PLOT_MAX_NEURONS = 10
+
+# Parallelism
+N_WORKERS = max(1, int(os.environ.get("TC_N_WORKERS", os.cpu_count() or 1)))
 
 # Derived
 BIN_SEC = BIN_MS / 1000.0
