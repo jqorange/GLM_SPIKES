@@ -20,6 +20,8 @@ def parse_day_id_from_path(day_dir: Path) -> Optional[str]:
     s = str(day_dir)
     mF = re.search(r"F(\d+)", s, flags=re.IGNORECASE)
     mD = re.search(r"day\\s*([0-9]+)", s, flags=re.IGNORECASE)
+    if mD is None:
+        mD = re.search(r"day\s*([0-9]+)", s, flags=re.IGNORECASE)
     if mF and mD:
         return f"F{int(mF.group(1))}D{int(mD.group(1))}"
     return None
