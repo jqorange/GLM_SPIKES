@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import N_WORKERS, OUT_ROOT, PERCENTILE, PLOT_MAX_NEURONS, SHUFFLE_N
+from .config import N_WORKERS, OUT_ROOT, PERCENTILE, SHUFFLE_N
 from .io_utils import list_sessions_all, load_session_raw
 from .plotting import binning_note, plot_neuron_summary
 from .tuning_scores import (
@@ -17,6 +17,7 @@ from .tuning_scores import (
     compute_shuffle_scores,
     build_bins,
 )
+from contribution_utils.cell_metrics import build_dayid_to_cellinfo, pyramidal_indices_for_session
 
 
 def _write_lines(path: Path, lines):
@@ -47,7 +48,7 @@ def _process_neuron(args: tuple[int, int]) -> tuple[int, ScoreResult, dict[str, 
     return neuron_idx, scores, aux, shuffle_scores
 
 
-def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
+def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: int = SHUFFLE_N) -> Path:
     data = load_session_raw(session)
     inputs = TuningInputs(
         head_x=data["head_x"],
@@ -65,12 +66,15 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
     binning_note(session_dir / "binning_notes.txt")
 
     n_neurons = inputs.spikes.shape[1]
+    pyr_idx = pyramidal_indices_for_session(session, dayid2cellinfo, n_neurons)
+    if pyr_idx is None or pyr_idx.size == 0:
+        raise RuntimeError("pyramidal cell info not found or empty")
     rows = []
     seed_seq = np.random.SeedSequence(0)
     seeds = [int(s.generate_state(1)[0]) for s in seed_seq.spawn(n_neurons)]
 
-    if N_WORKERS > 1 and n_neurons > 1:
-        tasks = [(idx, seeds[idx]) for idx in range(n_neurons)]
+    if N_WORKERS > 1 and pyr_idx.size > 1:
+        tasks = [(int(idx), seeds[int(idx)]) for idx in pyr_idx]
         with ProcessPoolExecutor(
             max_workers=N_WORKERS,
             initializer=_init_worker,
@@ -114,16 +118,15 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
 
                 rows.append(row)
 
-                if n_idx < PLOT_MAX_NEURONS:
-                    plot_neuron_summary(
-                        session_dir / "plots",
-                        n_idx,
-                        row,
-                        aux,
-                    )
+                plot_neuron_summary(
+                    session_dir / f"neuron_{n_idx:03d}",
+                    n_idx,
+                    row,
+                    aux,
+                )
     else:
         rng = np.random.default_rng(seed=0)
-        for n_idx in range(n_neurons):
+        for n_idx in pyr_idx.tolist():
             scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
             shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
 
@@ -162,13 +165,12 @@ def process_session(session: str, n_shuffle: int = SHUFFLE_N) -> Path:
 
             rows.append(row)
 
-            if n_idx < PLOT_MAX_NEURONS:
-                plot_neuron_summary(
-                    session_dir / "plots",
-                    n_idx,
-                    row,
-                    aux,
-                )
+            plot_neuron_summary(
+                session_dir / f"neuron_{n_idx:03d}",
+                n_idx,
+                row,
+                aux,
+            )
 
     df = pd.DataFrame(rows)
     out_csv = session_dir / "tuning_scores.csv"
@@ -182,13 +184,14 @@ def main():
         print("[FATAL] No sessions with required inputs found.")
         return
 
+    dayid2cellinfo = build_dayid_to_cellinfo()
     _write_lines(OUT_ROOT / "sessions_all_present.txt", sessions)
     print(f"[INFO] Found {len(sessions)} sessions with all required inputs present.")
 
     processed = []
     for session in sessions:
         try:
-            out_csv = process_session(session)
+            out_csv = process_session(session, dayid2cellinfo)
         except Exception as exc:  # pragma: no cover - runtime logging
             print(f"[SKIP] {session}: {exc}")
             continue
