@@ -47,6 +47,8 @@ def plot_polar_curve(out_path: Path, theta_deg: np.ndarray, r: np.ndarray, title
     theta_c, r_c = _close_curve(theta_deg, r)
     plt.figure(figsize=(6.0, 6.0))
     ax = plt.subplot(111, projection="polar")
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
     ax.plot(theta_c, r_c, linewidth=2, color=color)
     ax.fill(theta_c, r_c, alpha=0.22, color=color)
     ax.set_title(title)
@@ -93,10 +95,7 @@ def plot_neuron_summary(
     aux: Dict[str, np.ndarray],
 ) -> None:
     theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
-    title_bits = (
-        f"Neuron {neuron_idx} | grid={score_dict.get('grid_score', float('nan')):.3f}, "
-        f"border={score_dict.get('border_score', float('nan')):.3f}"
-    )
+    title_bits = f"Neuron {neuron_idx} | border={score_dict.get('border_score', float('nan')):.3f}"
     _plot_single_rate_map(
         out_dir / "position.png",
         aux["rate_map"],

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -9,15 +8,9 @@ from scipy import ndimage, signal
 
 from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
 from glm_poisson_forward.design_matrix import bin_col
-from .config import (
-    ADAPTIVE_SMOOTH_ALPHA,
-    BIN_SEC,
-    HD_SMOOTH_DEG,
-    SHUFFLE_MIN_SEC,
-    SPEED_MAX_M_S,
-    SPEED_MIN_M_S,
-    SPEED_SMOOTH_MS,
-)
+from .config import BIN_SEC, SHUFFLE_MIN_SEC, SPEED_MAX_M_S, SPEED_MIN_M_S
+
+SMOOTH_WINDOW = 2
 
 
 @dataclass
@@ -47,7 +40,6 @@ class SessionBinning:
 
 @dataclass
 class ScoreResult:
-    grid_score: float
     border_score: float
     hd_score: float
     roll_score: float
@@ -123,7 +115,7 @@ def rate_map_2d(
     return rate_map, occupancy_sec
 
 
-def adaptive_smooth(rate_map: np.ndarray, occupancy_sec: np.ndarray, alpha: float = ADAPTIVE_SMOOTH_ALPHA) -> np.ndarray:
+def adaptive_smooth(rate_map: np.ndarray, occupancy_sec: np.ndarray, alpha: float = SMOOTH_WINDOW) -> np.ndarray:
     smoothed = np.full_like(rate_map, np.nan, dtype=np.float64)
     spikes_map = np.nan_to_num(rate_map * occupancy_sec, nan=0.0)
     max_radius = int(max(rate_map.shape))
@@ -165,44 +157,6 @@ def _autocorr_2d(rate_map: np.ndarray) -> np.ndarray:
     with np.errstate(invalid="ignore", divide="ignore"):
         out = numerator / np.maximum(overlap, 1.0)
     return out
-
-
-def _rotate_corr(base: np.ndarray, angle: float, ring_mask: np.ndarray) -> float:
-    rotated = ndimage.rotate(base, angle, reshape=False, order=1, mode="constant", cval=np.nan)
-    vals1 = base[ring_mask]
-    vals2 = rotated[ring_mask]
-    ok = np.isfinite(vals1) & np.isfinite(vals2)
-    if np.sum(ok) < 5:
-        return np.nan
-    v1 = vals1[ok]
-    v2 = vals2[ok]
-    if np.std(v1) == 0 or np.std(v2) == 0:
-        return np.nan
-    return float(np.corrcoef(v1, v2)[0, 1])
-
-
-def grid_score(rate_map: np.ndarray) -> Tuple[float, np.ndarray]:
-    autocorr = _autocorr_2d(rate_map)
-    if autocorr.size == 1:
-        return float("nan"), autocorr
-
-    cy, cx = np.array(autocorr.shape) // 2
-    ys, xs = np.indices(autocorr.shape)
-    dist = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
-    r_max = min(cy, cx) - 1
-    if r_max <= 2:
-        return float("nan"), autocorr
-
-    ring_mask = (dist >= 2) & (dist <= r_max)
-
-    rot_angles = [30, 60, 90, 120, 150]
-    corrs = {a: _rotate_corr(autocorr, a, ring_mask) for a in rot_angles}
-
-    hi = np.nanmin([corrs[60], corrs[120]])
-    lo = np.nanmax([corrs[30], corrs[90], corrs[150]])
-    if np.isnan(hi) or np.isnan(lo):
-        return float("nan"), autocorr
-    return float(hi - lo), autocorr
 
 
 def border_score(rate_map: np.ndarray, occupancy_sec: np.ndarray) -> float:
@@ -268,7 +222,7 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
 
     rate = np.nan_to_num(rate, nan=0.0)
     bin_deg = 360.0 / ANGLE_N_BINS
-    sigma_bins = HD_SMOOTH_DEG / bin_deg
+    sigma_bins = float(SMOOTH_WINDOW)
     if sigma_bins > 0:
         rate_smooth = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="wrap")
     else:
@@ -288,7 +242,7 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
         raise ValueError("speed_score expects 1D spikes array")
 
     rate = spikes.astype(np.float64) / BIN_SEC
-    sigma_bins = SPEED_SMOOTH_MS / (BIN_SEC * 1000.0)
+    sigma_bins = float(SMOOTH_WINDOW)
     if sigma_bins > 0:
         rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
 
@@ -314,7 +268,7 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
     rate = np.nan_to_num(rate, nan=0.0)
-    sigma_bins = SPEED_SMOOTH_MS / (BIN_SEC * 1000.0)
+    sigma_bins = float(SMOOTH_WINDOW)
     if sigma_bins > 0:
         rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
     return rate
@@ -409,7 +363,7 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
         bins.y_size,
     )
 
-    g_score, autocorr = grid_score(rate_map)
+    autocorr = _autocorr_2d(rate_map)
     b_score = border_score(rate_map, occ)
     hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask)
     roll_score, roll_curve = angular_score(bins.roll_bin, spikes, mask)
@@ -441,7 +395,6 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
 
     return (
         ScoreResult(
-            grid_score=g_score,
             border_score=b_score,
             hd_score=hd_score,
             roll_score=roll_score,
@@ -478,7 +431,6 @@ def compute_shuffle_scores(
     mask = valid_speed_mask(inputs.head_v)
 
     scores = {
-        "grid_score": [],
         "border_score": [],
         "hd_score": [],
         "roll_score": [],
@@ -499,8 +451,6 @@ def compute_shuffle_scores(
             bins.x_size,
             bins.y_size,
         )
-        g_score, _ = grid_score(rate_map)
-        scores["grid_score"].append(g_score)
         scores["border_score"].append(border_score(rate_map, occ))
         scores["hd_score"].append(angular_score(bins.hd_bin, sh_spikes, mask)[0])
         scores["roll_score"].append(angular_score(bins.roll_bin, sh_spikes, mask)[0])
