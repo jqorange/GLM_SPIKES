@@ -70,7 +70,7 @@ def build_bins(inputs: TuningInputs) -> SessionBinning:
     x_size = int(np.max(x_bin) - x_min + 1)
     y_size = int(np.max(y_bin) - y_min + 1)
 
-    speed_bin = bin_col(inputs.head_v, n_bins=SPEED_N_BINS, vmin=0.0, vmax=1.5)
+    speed_bin = bin_col(inputs.head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
     hd_bin = bin_col(inputs.heading_rad, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
     roll_bin = bin_col(inputs.roll, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
     pitch_bin = bin_col(inputs.pitch, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
@@ -302,7 +302,7 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
 
 
 def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0.0, vmax=1.5)
+    bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
     bins_sel = bins[mask]
     spikes_sel = spikes[mask]
 

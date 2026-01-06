@@ -8,6 +8,8 @@ import numpy as np
 
 from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
 
+from .config import SPEED_MAX_M_S, SPEED_MIN_M_S
+
 
 def _plot_rate_map(ax, rate_map: np.ndarray) -> None:
     display_map = np.nan_to_num(rate_map, nan=0.0)
@@ -27,7 +29,7 @@ def _plot_autocorr(ax, autocorr: np.ndarray) -> None:
 
 
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
-    edges = np.linspace(0.0, 1.5, SPEED_N_BINS + 1)
+    edges = np.linspace(SPEED_MIN_M_S, SPEED_MAX_M_S, SPEED_N_BINS + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
     ax.plot(centers, speed_curve, color="tab:green")
     ax.set_title("Speed tuning")
@@ -74,6 +76,16 @@ def _plot_single_speed(out_path: Path, speed_curve: np.ndarray, title: str) -> N
     plt.close(fig)
 
 
+def _plot_single_autocorr(out_path: Path, autocorr: np.ndarray, title: str) -> None:
+    fig, ax = plt.subplots(figsize=(6.0, 5.0))
+    _plot_autocorr(ax, autocorr)
+    ax.set_title(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_neuron_summary(
     out_dir: Path,
     neuron_idx: int,
@@ -86,32 +98,37 @@ def plot_neuron_summary(
         f"border={score_dict.get('border_score', float('nan')):.3f}"
     )
     _plot_single_rate_map(
-        out_dir / "position" / f"neuron_{neuron_idx:03d}.png",
+        out_dir / "position.png",
         aux["rate_map"],
         title_bits,
     )
     _plot_single_speed(
-        out_dir / "speed" / f"neuron_{neuron_idx:03d}.png",
+        out_dir / "speed.png",
         aux["speed_curve"],
         f"Neuron {neuron_idx} | speed tuning",
     )
+    _plot_single_autocorr(
+        out_dir / "autocorr.png",
+        aux["autocorr"],
+        f"Neuron {neuron_idx} | 2D autocorrelation",
+    )
 
     plot_polar_curve(
-        out_dir / "yaw" / f"neuron_{neuron_idx:03d}.png",
+        out_dir / "yaw.png",
         theta_deg,
         aux["hd_curve"],
         f"Neuron {neuron_idx} | yaw tuning",
         color="#1f77b4",
     )
     plot_polar_curve(
-        out_dir / "roll" / f"neuron_{neuron_idx:03d}.png",
+        out_dir / "roll.png",
         theta_deg,
         aux["roll_curve"],
         f"Neuron {neuron_idx} | roll tuning",
         color="#ff7f0e",
     )
     plot_polar_curve(
-        out_dir / "pitch" / f"neuron_{neuron_idx:03d}.png",
+        out_dir / "pitch.png",
         theta_deg,
         aux["pitch_curve"],
         f"Neuron {neuron_idx} | pitch tuning",
