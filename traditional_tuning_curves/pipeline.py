@@ -87,7 +87,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
 
                 row = {
                     "neuron": n_idx,
-                    "grid_score": scores.grid_score,
                     "border_score": scores.border_score,
                     "hd_score": scores.hd_score,
                     "roll_score": scores.roll_score,
@@ -98,7 +97,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                     "angular_stability": scores.angular_stability,
                     "roll_stability": scores.roll_stability,
                     "pitch_stability": scores.pitch_stability,
-                    "grid_thresh": thresholds.get("grid_score"),
                     "border_thresh": thresholds.get("border_score"),
                     "hd_thresh": thresholds.get("hd_score"),
                     "roll_thresh": thresholds.get("roll_score"),
@@ -107,7 +105,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                     "speed_stab_thresh": thresholds.get("speed_stability"),
                 }
 
-                row["is_grid"] = row["grid_score"] > row["grid_thresh"]
                 row["is_border"] = row["border_score"] > row["border_thresh"]
                 row["is_hd"] = row["hd_score"] > row["hd_thresh"]
                 row["is_roll"] = row["roll_score"] > row["roll_thresh"]
@@ -134,7 +131,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
 
             row = {
                 "neuron": n_idx,
-                "grid_score": scores.grid_score,
                 "border_score": scores.border_score,
                 "hd_score": scores.hd_score,
                 "roll_score": scores.roll_score,
@@ -145,7 +141,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                 "angular_stability": scores.angular_stability,
                 "roll_stability": scores.roll_stability,
                 "pitch_stability": scores.pitch_stability,
-                "grid_thresh": thresholds.get("grid_score"),
                 "border_thresh": thresholds.get("border_score"),
                 "hd_thresh": thresholds.get("hd_score"),
                 "roll_thresh": thresholds.get("roll_score"),
@@ -154,7 +149,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                 "speed_stab_thresh": thresholds.get("speed_stability"),
             }
 
-            row["is_grid"] = row["grid_score"] > row["grid_thresh"]
             row["is_border"] = row["border_score"] > row["border_thresh"]
             row["is_hd"] = row["hd_score"] > row["hd_thresh"]
             row["is_roll"] = row["roll_score"] > row["roll_thresh"]
