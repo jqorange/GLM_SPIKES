@@ -13,7 +13,24 @@ SPEED_MAX_M_S = 1.0
 # Shuffle settings
 SHUFFLE_N = 200
 SHUFFLE_MIN_SEC = 20.0
-PERCENTILE = 99
+
+# Score thresholds (percentiles of shuffle distributions)
+SCORE_PERCENTILES = {
+    "hd_score": 99,
+    "roll_score": 99,
+    "pitch_score": 99,
+    "speed_score": 99,
+    "speed_stability": 99,
+}
+
+# Smoothing
+# Unmasked rate smoothing (time series) for speed score
+RATE_SMOOTH_SIGMA_BINS = 2.0
+# Bin-wise smoothing for tuning curves (fixed for visualization)
+BIN_SMOOTH_SIGMA_BINS = 2.0
+
+# Angular k-fold vector length (1..K)
+ANGULAR_K_MAX = 5
 
 # Plotting
 PLOT_MAX_NEURONS = 10
