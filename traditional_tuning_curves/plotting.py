@@ -111,6 +111,18 @@ def plot_neuron_summary(
     )
 
 
+def _equalize_polar_area(
+    theta_rad: np.ndarray, indoor: np.ndarray, outdoor: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    dtheta = float(np.mean(np.diff(np.concatenate([theta_rad, theta_rad[:1] + 2 * np.pi]))))
+    indoor_area = 0.5 * float(np.sum(indoor**2) * dtheta)
+    outdoor_area = 0.5 * float(np.sum(outdoor**2) * dtheta)
+    target_area = 0.5 * (indoor_area + outdoor_area)
+    indoor_scale = np.sqrt(target_area / indoor_area) if indoor_area > 0 else 1.0
+    outdoor_scale = np.sqrt(target_area / outdoor_area) if outdoor_area > 0 else 1.0
+    return indoor * indoor_scale, outdoor * outdoor_scale
+
+
 def plot_paired_polar_curve(
     out_path: Path,
     theta_deg: np.ndarray,
@@ -123,6 +135,7 @@ def plot_paired_polar_curve(
     theta_rad = np.deg2rad(theta_deg)
     indoor = np.nan_to_num(indoor_curve, nan=0.0)
     outdoor = np.nan_to_num(outdoor_curve, nan=0.0)
+    indoor, outdoor = _equalize_polar_area(theta_rad, indoor, outdoor)
     theta_c = np.concatenate([theta_rad, theta_rad[:1]])
     indoor_c = np.concatenate([indoor, indoor[:1]])
     outdoor_c = np.concatenate([outdoor, outdoor[:1]])

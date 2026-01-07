@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import N_WORKERS, OUT_ROOT, SCORE_PERCENTILES, SHUFFLE_N
+from .config import N_WORKERS, OUT_ROOT, REBUILD_PAIRED_POLAR_PLOTS, SCORE_PERCENTILES, SHUFFLE_N
 from .io_utils import list_sessions_all, load_session_raw
 from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve
 from .tuning_scores import (
@@ -91,6 +91,17 @@ def _find_session_pairs(sessions: list[str]) -> list[tuple[str, str]]:
             if outdoor in sessions_set:
                 pairs.append((session, outdoor))
     return pairs
+
+
+def _session_complete(session: str) -> bool:
+    session_dir = OUT_ROOT / session
+    out_csv = session_dir / "tuning_scores.csv"
+    if not out_csv.exists() or out_csv.stat().st_size == 0:
+        return False
+    neuron_dirs = list(session_dir.glob("neuron_*"))
+    if not neuron_dirs:
+        return False
+    return True
 
 
 def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
@@ -271,8 +282,18 @@ def main():
     _write_lines(OUT_ROOT / "sessions_all_present.txt", sessions)
     print(f"[INFO] Found {len(sessions)} sessions with all required inputs present.")
 
-    processed = []
+    completed = []
+    pending = []
     for session in sessions:
+        if _session_complete(session):
+            completed.append(session)
+        else:
+            pending.append(session)
+    if completed:
+        print(f"[INFO] Skipping {len(completed)} completed sessions.")
+
+    processed = []
+    for session in pending:
         try:
             out_csv = process_session(session, dayid2cellinfo)
         except Exception as exc:  # pragma: no cover - runtime logging
@@ -281,9 +302,11 @@ def main():
         processed.append(session)
         print(f"[DONE] {session}: {out_csv}")
 
-    _write_lines(OUT_ROOT / "sessions_processed.txt", processed)
+    all_processed = completed + processed
+    _write_lines(OUT_ROOT / "sessions_processed.txt", all_processed)
 
-    pairs = _find_session_pairs(processed)
+    pair_sessions = all_processed if REBUILD_PAIRED_POLAR_PLOTS else processed
+    pairs = _find_session_pairs(pair_sessions)
     for indoor_session, outdoor_session in pairs:
         indoor_dir = OUT_ROOT / indoor_session
         outdoor_dir = OUT_ROOT / outdoor_session
