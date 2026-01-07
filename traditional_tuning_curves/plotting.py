@@ -20,14 +20,6 @@ def _plot_rate_map(ax, rate_map: np.ndarray) -> None:
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
 
-def _plot_autocorr(ax, autocorr: np.ndarray) -> None:
-    im = ax.imshow(autocorr, origin="lower", cmap="coolwarm")
-    ax.set_title("Autocorrelation")
-    ax.set_xlabel("X lag")
-    ax.set_ylabel("Y lag")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
     edges = np.linspace(SPEED_MIN_M_S, SPEED_MAX_M_S, SPEED_N_BINS + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -78,24 +70,13 @@ def _plot_single_speed(out_path: Path, speed_curve: np.ndarray, title: str) -> N
     plt.close(fig)
 
 
-def _plot_single_autocorr(out_path: Path, autocorr: np.ndarray, title: str) -> None:
-    fig, ax = plt.subplots(figsize=(6.0, 5.0))
-    _plot_autocorr(ax, autocorr)
-    ax.set_title(title)
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
 def plot_neuron_summary(
     out_dir: Path,
     neuron_idx: int,
-    score_dict: Dict[str, float],
     aux: Dict[str, np.ndarray],
 ) -> None:
     theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
-    title_bits = f"Neuron {neuron_idx} | border={score_dict.get('border_score', float('nan')):.3f}"
+    title_bits = f"Neuron {neuron_idx}"
     _plot_single_rate_map(
         out_dir / "position.png",
         aux["rate_map"],
@@ -105,11 +86,6 @@ def plot_neuron_summary(
         out_dir / "speed.png",
         aux["speed_curve"],
         f"Neuron {neuron_idx} | speed tuning",
-    )
-    _plot_single_autocorr(
-        out_dir / "autocorr.png",
-        aux["autocorr"],
-        f"Neuron {neuron_idx} | 2D autocorrelation",
     )
 
     plot_polar_curve(
@@ -133,6 +109,38 @@ def plot_neuron_summary(
         f"Neuron {neuron_idx} | pitch tuning",
         color="#2ca02c",
     )
+
+
+def plot_paired_polar_curve(
+    out_path: Path,
+    theta_deg: np.ndarray,
+    indoor_curve: np.ndarray,
+    outdoor_curve: np.ndarray,
+    title: str,
+    indoor_color: str = "#1f77b4",
+    outdoor_color: str = "#d62728",
+) -> None:
+    theta_rad = np.deg2rad(theta_deg)
+    indoor = np.nan_to_num(indoor_curve, nan=0.0)
+    outdoor = np.nan_to_num(outdoor_curve, nan=0.0)
+    theta_c = np.concatenate([theta_rad, theta_rad[:1]])
+    indoor_c = np.concatenate([indoor, indoor[:1]])
+    outdoor_c = np.concatenate([outdoor, outdoor[:1]])
+
+    plt.figure(figsize=(6.0, 6.0))
+    ax = plt.subplot(111, projection="polar")
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.plot(theta_c, indoor_c, linewidth=2, color=indoor_color, label="indoor")
+    ax.plot(theta_c, outdoor_c, linewidth=2, color=outdoor_color, label="outdoor")
+    ax.fill(theta_c, indoor_c, alpha=0.15, color=indoor_color)
+    ax.fill(theta_c, outdoor_c, alpha=0.15, color=outdoor_color)
+    ax.set_title(title)
+    ax.legend(loc="upper right", bbox_to_anchor=(1.2, 1.15))
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=200)
+    plt.close()
 
 
 def binning_note(out_path: Path) -> None:

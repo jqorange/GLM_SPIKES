@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import N_WORKERS, OUT_ROOT, PERCENTILE, SHUFFLE_N
+from .config import N_WORKERS, OUT_ROOT, SCORE_PERCENTILES, SHUFFLE_N
 from .io_utils import list_sessions_all, load_session_raw
-from .plotting import binning_note, plot_neuron_summary
+from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve
 from .tuning_scores import (
     ScoreResult,
     SessionBinning,
@@ -48,6 +48,101 @@ def _process_neuron(args: tuple[int, int]) -> tuple[int, ScoreResult, dict[str, 
     return neuron_idx, scores, aux, shuffle_scores
 
 
+def _score_thresholds(shuffle_scores: dict[str, np.ndarray]) -> dict[str, float]:
+    thresholds = {}
+    for key, percentile in SCORE_PERCENTILES.items():
+        values = shuffle_scores.get(key)
+        if values is None or values.size == 0:
+            thresholds[key] = float("nan")
+        else:
+            thresholds[key] = float(np.nanpercentile(values, percentile))
+    return thresholds
+
+
+def _save_polar_curves(out_dir: Path, aux: dict[str, np.ndarray]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        out_dir / "polar_curves.npz",
+        hd_curve=aux["hd_curve"],
+        roll_curve=aux["roll_curve"],
+        pitch_curve=aux["pitch_curve"],
+    )
+
+
+def _load_polar_curves(out_dir: Path) -> dict[str, np.ndarray] | None:
+    path = out_dir / "polar_curves.npz"
+    if not path.exists():
+        return None
+    data = np.load(path)
+    return {
+        "hd_curve": data["hd_curve"],
+        "roll_curve": data["roll_curve"],
+        "pitch_curve": data["pitch_curve"],
+    }
+
+
+def _find_session_pairs(sessions: list[str]) -> list[tuple[str, str]]:
+    sessions_set = set(sessions)
+    pairs = []
+    for session in sessions:
+        if session.endswith("_indoor"):
+            base = session[: -len("_indoor")]
+            outdoor = f"{base}_outdoor"
+            if outdoor in sessions_set:
+                pairs.append((session, outdoor))
+    return pairs
+
+
+def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
+    curves_a = _load_polar_curves(neuron_dir_a)
+    curves_b = _load_polar_curves(neuron_dir_b)
+    if curves_a is None or curves_b is None:
+        return
+    theta_deg = np.linspace(0.0, 360.0, len(curves_a["hd_curve"]), endpoint=False)
+    plot_paired_polar_curve(
+        neuron_dir_a / "yaw_indoor_outdoor.png",
+        theta_deg,
+        curves_a["hd_curve"],
+        curves_b["hd_curve"],
+        "Yaw tuning (indoor vs outdoor)",
+    )
+    plot_paired_polar_curve(
+        neuron_dir_a / "roll_indoor_outdoor.png",
+        theta_deg,
+        curves_a["roll_curve"],
+        curves_b["roll_curve"],
+        "Roll tuning (indoor vs outdoor)",
+    )
+    plot_paired_polar_curve(
+        neuron_dir_a / "pitch_indoor_outdoor.png",
+        theta_deg,
+        curves_a["pitch_curve"],
+        curves_b["pitch_curve"],
+        "Pitch tuning (indoor vs outdoor)",
+    )
+    plot_paired_polar_curve(
+        neuron_dir_b / "yaw_indoor_outdoor.png",
+        theta_deg,
+        curves_a["hd_curve"],
+        curves_b["hd_curve"],
+        "Yaw tuning (indoor vs outdoor)",
+    )
+    plot_paired_polar_curve(
+        neuron_dir_b / "roll_indoor_outdoor.png",
+        theta_deg,
+        curves_a["roll_curve"],
+        curves_b["roll_curve"],
+        "Roll tuning (indoor vs outdoor)",
+    )
+    plot_paired_polar_curve(
+        neuron_dir_b / "pitch_indoor_outdoor.png",
+        theta_deg,
+        curves_a["pitch_curve"],
+        curves_b["pitch_curve"],
+        "Pitch tuning (indoor vs outdoor)",
+    )
+
+
 def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: int = SHUFFLE_N) -> Path:
     data = load_session_raw(session)
     inputs = TuningInputs(
@@ -83,11 +178,10 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
             results = executor.map(_process_neuron, tasks)
             iterable = results
             for n_idx, scores, aux, shuffle_scores in iterable:
-                thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
+                thresholds = _score_thresholds(shuffle_scores)
 
                 row = {
                     "neuron": n_idx,
-                    "border_score": scores.border_score,
                     "hd_score": scores.hd_score,
                     "roll_score": scores.roll_score,
                     "pitch_score": scores.pitch_score,
@@ -97,7 +191,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                     "angular_stability": scores.angular_stability,
                     "roll_stability": scores.roll_stability,
                     "pitch_stability": scores.pitch_stability,
-                    "border_thresh": thresholds.get("border_score"),
                     "hd_thresh": thresholds.get("hd_score"),
                     "roll_thresh": thresholds.get("roll_score"),
                     "pitch_thresh": thresholds.get("pitch_score"),
@@ -105,7 +198,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                     "speed_stab_thresh": thresholds.get("speed_stability"),
                 }
 
-                row["is_border"] = row["border_score"] > row["border_thresh"]
                 row["is_hd"] = row["hd_score"] > row["hd_thresh"]
                 row["is_roll"] = row["roll_score"] > row["roll_thresh"]
                 row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
@@ -118,20 +210,19 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                 plot_neuron_summary(
                     session_dir / f"neuron_{n_idx:03d}",
                     n_idx,
-                    row,
                     aux,
                 )
+                _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
     else:
         rng = np.random.default_rng(seed=0)
         for n_idx in pyr_idx.tolist():
             scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
             shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
 
-            thresholds = {k: np.nanpercentile(v, PERCENTILE) for k, v in shuffle_scores.items()}
+            thresholds = _score_thresholds(shuffle_scores)
 
             row = {
                 "neuron": n_idx,
-                "border_score": scores.border_score,
                 "hd_score": scores.hd_score,
                 "roll_score": scores.roll_score,
                 "pitch_score": scores.pitch_score,
@@ -141,7 +232,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                 "angular_stability": scores.angular_stability,
                 "roll_stability": scores.roll_stability,
                 "pitch_stability": scores.pitch_stability,
-                "border_thresh": thresholds.get("border_score"),
                 "hd_thresh": thresholds.get("hd_score"),
                 "roll_thresh": thresholds.get("roll_score"),
                 "pitch_thresh": thresholds.get("pitch_score"),
@@ -149,7 +239,6 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
                 "speed_stab_thresh": thresholds.get("speed_stability"),
             }
 
-            row["is_border"] = row["border_score"] > row["border_thresh"]
             row["is_hd"] = row["hd_score"] > row["hd_thresh"]
             row["is_roll"] = row["roll_score"] > row["roll_thresh"]
             row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
@@ -162,9 +251,9 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
             plot_neuron_summary(
                 session_dir / f"neuron_{n_idx:03d}",
                 n_idx,
-                row,
                 aux,
             )
+            _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
 
     df = pd.DataFrame(rows)
     out_csv = session_dir / "tuning_scores.csv"
@@ -193,6 +282,18 @@ def main():
         print(f"[DONE] {session}: {out_csv}")
 
     _write_lines(OUT_ROOT / "sessions_processed.txt", processed)
+
+    pairs = _find_session_pairs(processed)
+    for indoor_session, outdoor_session in pairs:
+        indoor_dir = OUT_ROOT / indoor_session
+        outdoor_dir = OUT_ROOT / outdoor_session
+        indoor_neurons = sorted(indoor_dir.glob("neuron_*"))
+        if not indoor_neurons:
+            continue
+        for neuron_dir in indoor_neurons:
+            outdoor_neuron = outdoor_dir / neuron_dir.name
+            if outdoor_neuron.exists():
+                _plot_paired_polar(neuron_dir, outdoor_neuron)
 
 
 if __name__ == "__main__":

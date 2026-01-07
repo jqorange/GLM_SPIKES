@@ -4,13 +4,19 @@ from dataclasses import dataclass
 from typing import Dict, Tuple
 
 import numpy as np
-from scipy import ndimage, signal
+from scipy import ndimage
 
 from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
 from glm_poisson_forward.design_matrix import bin_col
-from .config import BIN_SEC, SHUFFLE_MIN_SEC, SPEED_MAX_M_S, SPEED_MIN_M_S
-
-SMOOTH_WINDOW = 2
+from .config import (
+    ANGULAR_K_MAX,
+    BIN_SEC,
+    BIN_SMOOTH_SIGMA_BINS,
+    RATE_SMOOTH_SIGMA_BINS,
+    SHUFFLE_MIN_SEC,
+    SPEED_MAX_M_S,
+    SPEED_MIN_M_S,
+)
 
 
 @dataclass
@@ -40,7 +46,6 @@ class SessionBinning:
 
 @dataclass
 class ScoreResult:
-    border_score: float
     hd_score: float
     roll_score: float
     pitch_score: float
@@ -115,97 +120,9 @@ def rate_map_2d(
     return rate_map, occupancy_sec
 
 
-def adaptive_smooth(rate_map: np.ndarray, occupancy_sec: np.ndarray, alpha: float = SMOOTH_WINDOW) -> np.ndarray:
-    smoothed = np.full_like(rate_map, np.nan, dtype=np.float64)
-    spikes_map = np.nan_to_num(rate_map * occupancy_sec, nan=0.0)
-    max_radius = int(max(rate_map.shape))
-
-    ys, xs = np.indices(rate_map.shape)
-
-    for i in range(rate_map.shape[0]):
-        for j in range(rate_map.shape[1]):
-            best_val = np.nan
-            for r in range(1, max_radius + 1):
-                dist = np.sqrt((ys - i) ** 2 + (xs - j) ** 2)
-                mask = dist <= r
-                occ = np.sum(occupancy_sec[mask])
-                spk = np.sum(spikes_map[mask])
-                if occ <= 0:
-                    continue
-                if spk > 0 and (spk / occ) >= (alpha / (occ * np.sqrt(spk))):
-                    best_val = spk / occ
-                    break
-            if np.isnan(best_val) and occupancy_sec[i, j] > 0:
-                best_val = spikes_map[i, j] / occupancy_sec[i, j]
-            smoothed[i, j] = best_val
-    return smoothed
-
-
-def _autocorr_2d(rate_map: np.ndarray) -> np.ndarray:
-    rm = np.array(rate_map, dtype=np.float64)
-    mask = np.isfinite(rm)
-    if not np.any(mask):
-        return np.full((1, 1), np.nan)
-    rm0 = rm.copy()
-    rm0[~mask] = 0.0
-    mean = np.mean(rm0[mask])
-    rm0 = rm0 - mean
-    rm0[~mask] = 0.0
-
-    numerator = signal.correlate2d(rm0, rm0, mode="full", boundary="fill", fillvalue=0)
-    overlap = signal.correlate2d(mask.astype(float), mask.astype(float), mode="full", boundary="fill", fillvalue=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = numerator / np.maximum(overlap, 1.0)
-    return out
-
-
-def border_score(rate_map: np.ndarray, occupancy_sec: np.ndarray) -> float:
-    if rate_map.size == 0 or np.all(~np.isfinite(rate_map)):
-        return float("nan")
-
-    smoothed = adaptive_smooth(rate_map, occupancy_sec)
-    if not np.any(np.isfinite(smoothed)):
-        return float("nan")
-
-    peak = np.nanmax(smoothed)
-    if peak <= 0 or np.isnan(peak):
-        return float("nan")
-
-    high = smoothed >= (0.2 * peak)
-    if not np.any(high):
-        return float("nan")
-
-    y_size, x_size = smoothed.shape
-    wall_lengths = {
-        "north": x_size,
-        "south": x_size,
-        "west": y_size,
-        "east": y_size,
-    }
-
-    coverages = []
-    for wall in ["north", "south", "west", "east"]:
-        if wall == "north":
-            bins = high[0, :]
-        elif wall == "south":
-            bins = high[-1, :]
-        elif wall == "west":
-            bins = high[:, 0]
-        else:
-            bins = high[:, -1]
-        coverages.append(np.sum(bins) / max(wall_lengths[wall], 1))
-
-    cm = float(np.max(coverages))
-
-    ys, xs = np.indices(smoothed.shape)
-    dist_to_wall = np.minimum.reduce([ys, xs, (y_size - 1) - ys, (x_size - 1) - xs]).astype(np.float64)
-    max_dist = float(np.nanmax(dist_to_wall)) if np.isfinite(dist_to_wall).any() else 1.0
-
-    weights = np.nan_to_num(smoothed, nan=0.0)
-    dm = float(np.sum(weights * dist_to_wall) / max(np.sum(weights), 1e-6))
-    dm /= max(max_dist, 1e-6)
-
-    return float((cm - dm) / (cm + dm + 1e-6))
+def _vector_length_k(weights: np.ndarray, angles: np.ndarray, k: int) -> float:
+    vect = np.sum(weights * np.exp(1j * k * angles)) / np.sum(weights)
+    return float(np.abs(vect))
 
 
 def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> Tuple[float, np.ndarray]:
@@ -222,7 +139,7 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
 
     rate = np.nan_to_num(rate, nan=0.0)
     bin_deg = 360.0 / ANGLE_N_BINS
-    sigma_bins = float(SMOOTH_WINDOW)
+    sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate_smooth = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="wrap")
     else:
@@ -232,9 +149,9 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
     weights = np.nan_to_num(rate_smooth, nan=0.0)
     if np.sum(weights) <= 0:
         return float("nan"), rate_smooth
-
-    vect = np.sum(weights * np.exp(1j * angles)) / np.sum(weights)
-    return float(np.abs(vect)), rate_smooth
+    k_max = max(int(ANGULAR_K_MAX), 1)
+    k_scores = [_vector_length_k(weights, angles, k) for k in range(1, k_max + 1)]
+    return float(np.nanmax(k_scores)), rate_smooth
 
 
 def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> float:
@@ -242,7 +159,7 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
         raise ValueError("speed_score expects 1D spikes array")
 
     rate = spikes.astype(np.float64) / BIN_SEC
-    sigma_bins = float(SMOOTH_WINDOW)
+    sigma_bins = float(RATE_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
 
@@ -268,7 +185,7 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
     rate = np.nan_to_num(rate, nan=0.0)
-    sigma_bins = float(SMOOTH_WINDOW)
+    sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
     return rate
@@ -352,7 +269,7 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
     spikes = inputs.spikes[:, neuron_idx].astype(np.float64)
     mask = valid_speed_mask(inputs.head_v)
 
-    rate_map, occ = rate_map_2d(
+    rate_map, _ = rate_map_2d(
         bins.x_bin,
         bins.y_bin,
         spikes,
@@ -363,8 +280,6 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
         bins.y_size,
     )
 
-    autocorr = _autocorr_2d(rate_map)
-    b_score = border_score(rate_map, occ)
     hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask)
     roll_score, roll_curve = angular_score(bins.roll_bin, spikes, mask)
     pitch_score, pitch_curve = angular_score(bins.pitch_bin, spikes, mask)
@@ -386,7 +301,6 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
 
     aux = {
         "rate_map": rate_map,
-        "autocorr": autocorr,
         "hd_curve": hd_curve,
         "roll_curve": roll_curve,
         "pitch_curve": pitch_curve,
@@ -395,7 +309,6 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
 
     return (
         ScoreResult(
-            border_score=b_score,
             hd_score=hd_score,
             roll_score=roll_score,
             pitch_score=pitch_score,
@@ -431,7 +344,6 @@ def compute_shuffle_scores(
     mask = valid_speed_mask(inputs.head_v)
 
     scores = {
-        "border_score": [],
         "hd_score": [],
         "roll_score": [],
         "pitch_score": [],
@@ -441,17 +353,6 @@ def compute_shuffle_scores(
 
     for _ in range(n_shuffle):
         sh_spikes = time_shift_spikes(base_spikes, rng)
-        rate_map, occ = rate_map_2d(
-            bins.x_bin,
-            bins.y_bin,
-            sh_spikes,
-            mask,
-            bins.x_min,
-            bins.y_min,
-            bins.x_size,
-            bins.y_size,
-        )
-        scores["border_score"].append(border_score(rate_map, occ))
         scores["hd_score"].append(angular_score(bins.hd_bin, sh_spikes, mask)[0])
         scores["roll_score"].append(angular_score(bins.roll_bin, sh_spikes, mask)[0])
         scores["pitch_score"].append(angular_score(bins.pitch_bin, sh_spikes, mask)[0])
