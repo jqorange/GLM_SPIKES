@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
+from scipy.special import gammaln
 
 from contribution_utils import (
     CI_HI,
@@ -209,10 +210,15 @@ def compute_session_dropone(
         y = Y_all[:, ni].astype(np.float64)
         mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
 
+        log_factorial_sum = float(np.sum(gammaln(y + 1.0)))
         ll_sat = poisson_loglik_saturated(y)
-        ll_full = poisson_loglik(y, mu_oof_full)
+        log_mu_full = np.log(np.clip(mu_oof_full, MU_EPS, None))
+        sum_mu_full = float(np.sum(mu_oof_full))
+        ll_full = float(np.dot(y, log_mu_full) - sum_mu_full - log_factorial_sum)
         mu0 = np.full_like(y, fill_value=max(float(np.mean(y)), MU_EPS), dtype=np.float64)
-        ll_null = poisson_loglik(y, mu0)
+        log_mu0 = np.log(np.clip(mu0, MU_EPS, None))
+        sum_mu0 = float(np.sum(mu0))
+        ll_null = float(np.dot(y, log_mu0) - sum_mu0 - log_factorial_sum)
 
         D_full = deviance_from_ll(ll_sat, ll_full)
         D_null = deviance_from_ll(ll_sat, ll_null)
@@ -222,11 +228,16 @@ def compute_session_dropone(
         full_devexpl_by_neuron[ni] = devexpl_from_deviances(D_full, D_null)
 
         mu_oof_red_by_feat: Dict[str, np.ndarray] = {}
+        log_mu_red_by_feat: Dict[str, np.ndarray] = {}
+        sum_mu_red_by_feat: Dict[str, float] = {}
         for v, (X_red, feats_red, model_dir_red) in red_models.items():
-            mu_oof_red_by_feat[v] = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
+            mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
+            mu_oof_red_by_feat[v] = mu_red
+            log_mu_red_by_feat[v] = np.log(np.clip(mu_red, MU_EPS, None))
+            sum_mu_red_by_feat[v] = float(np.sum(mu_red))
 
         for v, mu_oof_red in mu_oof_red_by_feat.items():
-            ll_red = poisson_loglik(y, mu_oof_red)
+            ll_red = float(np.dot(y, log_mu_red_by_feat[v]) - sum_mu_red_by_feat[v] - log_factorial_sum)
             D_red = deviance_from_ll(ll_sat, ll_red)
 
             denom = (D_null - D_full)
@@ -241,19 +252,14 @@ def compute_session_dropone(
 
         for s in range(N_SHUFFLE):
             y_shuf = rng.permutation(y)
-            ll_sat_shuf = poisson_loglik_saturated(y_shuf)
-            ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
-            mu0_shuf = np.full_like(y_shuf, fill_value=max(float(np.mean(y_shuf)), MU_EPS), dtype=np.float64)
-            ll_null_shuf = poisson_loglik(y_shuf, mu0_shuf)
+            ll_full_shuf = float(np.dot(y_shuf, log_mu_full) - sum_mu_full - log_factorial_sum)
+            D_full_shuf = deviance_from_ll(ll_sat, ll_full_shuf)
+            shuf_full[s] = devexpl_from_deviances(D_full_shuf, D_null)
 
-            D_full_shuf = deviance_from_ll(ll_sat_shuf, ll_full_shuf)
-            D_null_shuf = deviance_from_ll(ll_sat_shuf, ll_null_shuf)
-            shuf_full[s] = devexpl_from_deviances(D_full_shuf, D_null_shuf)
-
-            denom = D_null_shuf - D_full_shuf
-            for v, mu_oof_red in mu_oof_red_by_feat.items():
-                ll_red_shuf = poisson_loglik(y_shuf, mu_oof_red)
-                D_red_shuf = deviance_from_ll(ll_sat_shuf, ll_red_shuf)
+            denom = D_null - D_full_shuf
+            for v in VARS_ALL:
+                ll_red_shuf = float(np.dot(y_shuf, log_mu_red_by_feat[v]) - sum_mu_red_by_feat[v] - log_factorial_sum)
+                D_red_shuf = deviance_from_ll(ll_sat, ll_red_shuf)
                 if not np.isfinite(D_red_shuf) or not np.isfinite(denom) or denom <= 0:
                     shuf_frac[v][s] = float("nan")
                 else:
