@@ -8,7 +8,7 @@ OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Movement speed mask (m/s) corresponding to 2-100 cm/s
 SPEED_MIN_M_S = 0.02
-SPEED_MAX_M_S = 1.0
+SPEED_MAX_M_S = 1.5
 
 # Shuffle settings
 SHUFFLE_N = 200
@@ -25,7 +25,7 @@ SCORE_PERCENTILES = {
 
 # Smoothing
 # Unmasked rate smoothing (time series) for speed score
-RATE_SMOOTH_SIGMA_BINS = 2.0
+RATE_SMOOTH_SIGMA_BINS = 10.0
 # Bin-wise smoothing for tuning curves (fixed for visualization)
 BIN_SMOOTH_SIGMA_BINS = 2.0
 
@@ -36,7 +36,7 @@ ANGULAR_K_MAX = 5
 PLOT_MAX_NEURONS = 10
 
 # Parallelism
-N_WORKERS = max(1, int(os.environ.get("TC_N_WORKERS", os.cpu_count() or 1)))
+N_WORKERS = 28
 
 # Derived
 BIN_SEC = BIN_MS / 1000.0
