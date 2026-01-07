@@ -45,7 +45,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -444,7 +444,8 @@ def _compute_curve_rate(var: str, intercept: float, effects: Dict[str, np.ndarra
 
 def _plot_one_var(session_id: str, neuron: str, var: str,
                   indoor: Tuple[List[str], np.ndarray, float],
-                  outdoor: Tuple[List[str], np.ndarray, float]) -> None:
+                  outdoor: Tuple[List[str], np.ndarray, float],
+                  paired_output_session_ids: Sequence[str] | None = None) -> None:
     names_i, coef_i, int_i = indoor
     names_o, coef_o, int_o = outdoor
 
@@ -526,6 +527,14 @@ def _plot_one_var(session_id: str, neuron: str, var: str,
         out_png_polar = OUT_DIR / session_id / neuron / f"tuning_FULL_FIT_{var}_polar_indoor_vs_outdoor.png"
         out_png_polar.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_png_polar, dpi=200)
+
+        if paired_output_session_ids:
+            for paired_id in dict.fromkeys(paired_output_session_ids):
+                if paired_id == session_id:
+                    continue
+                paired_out = OUT_DIR / paired_id / neuron / f"tuning_FULL_FIT_{var}_polar_indoor_vs_outdoor.png"
+                paired_out.parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(paired_out, dpi=200)
         plt.close()
 
 
@@ -547,8 +556,10 @@ def _process_one_row(session_id: str, neuron: str, diff_str: str) -> Optional[st
         indoor_pack = _load_full_fit_avg_weights(neuron_dir_i)   # (names, coef, intercept)
         outdoor_pack = _load_full_fit_avg_weights(neuron_dir_o)
 
+        paired_output_session_ids = [indoor_sess_dir.name, outdoor_sess_dir.name]
         for v in plot_vars:
-            _plot_one_var(session_id, neuron, v, indoor_pack, outdoor_pack)
+            _plot_one_var(session_id, neuron, v, indoor_pack, outdoor_pack,
+                          paired_output_session_ids=paired_output_session_ids)
 
         return None
 
