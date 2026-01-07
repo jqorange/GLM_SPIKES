@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Compute Poisson-GLM Deviance Explained (DevExpl) and drop-one (reduced-model) contributions
-for PYRAMIDAL cells only, separately for indoor vs outdoor sessions.
+for PYRAMIDAL cells only, separately for indoor vs outdoor sessions. Contributions are
+z-scored against a label-shuffle baseline.
 
 The heavy lifting (cell-metrics parsing, weight caching, statistics, plotting) lives in
 ``contribution_utils`` so this file can stay focused on the high-level pipeline:
@@ -12,6 +13,7 @@ The heavy lifting (cell-metrics parsing, weight caching, statistics, plotting) l
    - identify pyramidal cells via cell_metrics.putativeCellType
    - fit/reuse Poisson GLM weights for the full model and each drop-one variant
    - compute neuron-level DevExpl and per-feature contribution fractions
+   - shuffle labels to estimate null distributions and z-score contributions
 2) Aggregate across sessions with hierarchical bootstraps (indoor vs outdoor)
 3) Save summary plots and CSVs, and write the drop-one boxplots (same logic as plot_contribution.py)
    for neurons with full DevExpl >= MIN_FULL_DEVEXPL.
@@ -77,6 +79,7 @@ from glm_poisson_forward.io_utils import (
 
 
 MIN_FULL_DEVEXPL = 0.1
+N_SHUFFLE = 100
 
 
 @dataclass
@@ -175,25 +178,39 @@ def compute_session_dropone(
     if full_csv.exists() and contrib_csv.exists():
         df_full = pd.read_csv(full_csv)
         df_con = pd.read_csv(contrib_csv)
-        full_map = {int(r["neuron_idx"]): float(r["devexpl_full"]) for _, r in df_full.iterrows()}
-        contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-        for _, r in df_con.iterrows():
-            contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["frac_full_dev"])
-        return SessionResult(session=session, group=group, full_devexpl_by_neuron=full_map, contrib_frac_by_feature_by_neuron=contrib)
+        has_shuffle = ("devexpl_shuf_mean" in df_full.columns) and ("frac_z" in df_con.columns)
+        if has_shuffle:
+            full_map = {int(r["neuron_idx"]): float(r["devexpl_full"]) for _, r in df_full.iterrows()}
+            contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+            for _, r in df_con.iterrows():
+                contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["frac_z"])
+            return SessionResult(session=session, group=group, full_devexpl_by_neuron=full_map, contrib_frac_by_feature_by_neuron=contrib)
 
     X_full, feats_full, mk_full = get_X(VARS_ALL)
     model_dir_full = fits_root / mk_full
 
+    red_models: Dict[str, Tuple[np.ndarray, List[str], Path]] = {}
+    for v in VARS_ALL:
+        mv = [x for x in VARS_ALL if x != v]
+        X_red, feats_red, mk_red = get_X(mv)
+        red_models[v] = (X_red, feats_red, fits_root / mk_red)
+
     full_devexpl_by_neuron: Dict[int, float] = {}
     D_full_by_neuron: Dict[int, float] = {}
     D_null_by_neuron: Dict[int, float] = {}
+    full_shuffle_stats: Dict[int, Tuple[float, float, float]] = {}
+
+    contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    contrib_shuffle_stats: Dict[str, Dict[int, Tuple[float, float, float]]] = {v: {} for v in VARS_ALL}
+
+    rng = np.random.default_rng(SEED)
 
     for ni in pyr_idx.tolist():
         y = Y_all[:, ni].astype(np.float64)
-        mu_oof = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
+        mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
 
         ll_sat = poisson_loglik_saturated(y)
-        ll_full = poisson_loglik(y, mu_oof)
+        ll_full = poisson_loglik(y, mu_oof_full)
         mu0 = np.full_like(y, fill_value=max(float(np.mean(y)), MU_EPS), dtype=np.float64)
         ll_null = poisson_loglik(y, mu0)
 
@@ -204,34 +221,68 @@ def compute_session_dropone(
         D_null_by_neuron[ni] = float(D_null)
         full_devexpl_by_neuron[ni] = devexpl_from_deviances(D_full, D_null)
 
-    contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+        mu_oof_red_by_feat: Dict[str, np.ndarray] = {}
+        for v, (X_red, feats_red, model_dir_red) in red_models.items():
+            mu_oof_red_by_feat[v] = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
 
-    for v in VARS_ALL:
-        mv = [x for x in VARS_ALL if x != v]
-        X_red, feats_red, mk_red = get_X(mv)
-        model_dir_red = fits_root / mk_red
-
-        for ni in pyr_idx.tolist():
-            y = Y_all[:, ni].astype(np.float64)
-            mu_oof_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
-
-            ll_sat = poisson_loglik_saturated(y)
+        for v, mu_oof_red in mu_oof_red_by_feat.items():
             ll_red = poisson_loglik(y, mu_oof_red)
             D_red = deviance_from_ll(ll_sat, ll_red)
 
-            D_full = D_full_by_neuron[ni]
-            D_null = D_null_by_neuron[ni]
             denom = (D_null - D_full)
-
             if not np.isfinite(D_red) or not np.isfinite(denom) or denom <= 0:
                 frac = float("nan")
             else:
                 frac = float((D_red - D_full) / denom)
             contrib[v][ni] = frac
 
+        shuf_full = np.full(N_SHUFFLE, np.nan, dtype=np.float64)
+        shuf_frac: Dict[str, np.ndarray] = {v: np.full(N_SHUFFLE, np.nan, dtype=np.float64) for v in VARS_ALL}
+
+        for s in range(N_SHUFFLE):
+            y_shuf = rng.permutation(y)
+            ll_sat_shuf = poisson_loglik_saturated(y_shuf)
+            ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
+            mu0_shuf = np.full_like(y_shuf, fill_value=max(float(np.mean(y_shuf)), MU_EPS), dtype=np.float64)
+            ll_null_shuf = poisson_loglik(y_shuf, mu0_shuf)
+
+            D_full_shuf = deviance_from_ll(ll_sat_shuf, ll_full_shuf)
+            D_null_shuf = deviance_from_ll(ll_sat_shuf, ll_null_shuf)
+            shuf_full[s] = devexpl_from_deviances(D_full_shuf, D_null_shuf)
+
+            denom = D_null_shuf - D_full_shuf
+            for v, mu_oof_red in mu_oof_red_by_feat.items():
+                ll_red_shuf = poisson_loglik(y_shuf, mu_oof_red)
+                D_red_shuf = deviance_from_ll(ll_sat_shuf, ll_red_shuf)
+                if not np.isfinite(D_red_shuf) or not np.isfinite(denom) or denom <= 0:
+                    shuf_frac[v][s] = float("nan")
+                else:
+                    shuf_frac[v][s] = float((D_red_shuf - D_full_shuf) / denom)
+
+        full_mu = float(np.nanmean(shuf_full))
+        full_std = float(np.nanstd(shuf_full, ddof=1))
+        full_z = float("nan") if (not np.isfinite(full_std) or full_std <= 0) else float((full_devexpl_by_neuron[ni] - full_mu) / full_std)
+        full_shuffle_stats[ni] = (full_mu, full_std, full_z)
+
+        for v in VARS_ALL:
+            arr = shuf_frac[v]
+            mu = float(np.nanmean(arr))
+            std = float(np.nanstd(arr, ddof=1))
+            real = contrib[v][ni]
+            z = float("nan") if (not np.isfinite(std) or std <= 0 or not np.isfinite(real)) else float((real - mu) / std)
+            contrib_shuffle_stats[v][ni] = (mu, std, z)
+
     df_full = pd.DataFrame(
         [
-            {"session": session, "group": group, "neuron_idx": ni, "devexpl_full": full_devexpl_by_neuron[ni]}
+            {
+                "session": session,
+                "group": group,
+                "neuron_idx": ni,
+                "devexpl_full": full_devexpl_by_neuron[ni],
+                "devexpl_shuf_mean": full_shuffle_stats[ni][0],
+                "devexpl_shuf_std": full_shuffle_stats[ni][1],
+                "devexpl_z": full_shuffle_stats[ni][2],
+            }
             for ni in sorted(full_devexpl_by_neuron.keys())
         ]
     )
@@ -240,10 +291,27 @@ def compute_session_dropone(
     rows = []
     for v in VARS_ALL:
         for ni, frac in contrib[v].items():
-            rows.append({"session": session, "group": group, "feature": v, "neuron_idx": ni, "frac_full_dev": frac})
+            mu, std, z = contrib_shuffle_stats[v][ni]
+            rows.append(
+                {
+                    "session": session,
+                    "group": group,
+                    "feature": v,
+                    "neuron_idx": ni,
+                    "frac_full_dev": frac,
+                    "frac_shuf_mean": mu,
+                    "frac_shuf_std": std,
+                    "frac_z": z,
+                }
+            )
     pd.DataFrame(rows).to_csv(contrib_csv, index=False)
 
-    return SessionResult(session=session, group=group, full_devexpl_by_neuron=full_devexpl_by_neuron, contrib_frac_by_feature_by_neuron=contrib)
+    contrib_z: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    for v in VARS_ALL:
+        for ni in contrib[v]:
+            contrib_z[v][ni] = contrib_shuffle_stats[v][ni][2]
+
+    return SessionResult(session=session, group=group, full_devexpl_by_neuron=full_devexpl_by_neuron, contrib_frac_by_feature_by_neuron=contrib_z)
 
 
 def main():
@@ -288,6 +356,7 @@ def main():
         plot_stats,
         features=VARS_ALL,
         min_full_devexpl=MIN_FULL_DEVEXPL,
+        compute_delta=False,
     )
     summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "DROPONE_SUMMARY",
@@ -297,6 +366,7 @@ def main():
         seed=SEED,
         max_scatter_points=0,
         ylim_pad_frac=0.08,
+        use_zscore=True,
     )
     print(
         f"[OK] Drop-one boxplots (full DevExpl ≥ {MIN_FULL_DEVEXPL:g}): "

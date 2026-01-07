@@ -136,6 +136,7 @@ def load_dropone_session_stats(
     features: Iterable[str],
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+    use_zscore: bool = True,
 ) -> Optional[DroponeSessionStats]:
     session = Path(session_dir).name
     group = infer_group(session)
@@ -177,7 +178,12 @@ def load_dropone_session_stats(
             continue
         allowed = whitelist.get(feat, None) if whitelist is not None else None
         ni = r.get("neuron_idx", None)
-        fv = r.get("frac_full_dev", r.get("frac", None))
+        if use_zscore:
+            fv = r.get("frac_z", None)
+            if fv is None:
+                fv = r.get("frac_full_dev", r.get("frac", None))
+        else:
+            fv = r.get("frac_full_dev", r.get("frac", None))
         if ni is None or fv is None:
             continue
         try:
@@ -215,6 +221,7 @@ def collect_dropone_plot_data(
     *,
     features: Sequence[str],
     min_full_devexpl: float,
+    compute_delta: bool = True,
 ) -> DroponePlotData:
     feat_list = [str(f).strip() for f in features]
 
@@ -260,17 +267,19 @@ def collect_dropone_plot_data(
                 dv = st.full_devexpl.get(ni, np.nan)
                 if np.isfinite(fracv) and np.isfinite(dv):
                     vals_frac.append(float(fracv))
-                    vals_delta.append(float(fracv) * float(dv))
+                    if compute_delta:
+                        vals_delta.append(float(fracv) * float(dv))
 
             arr_frac = np.asarray(vals_frac, dtype=float)
             arr_frac = arr_frac[np.isfinite(arr_frac)]
             if arr_frac.size:
                 frac_by_session[g][f][st.session] = arr_frac
 
-            arr_delta = np.asarray(vals_delta, dtype=float)
-            arr_delta = arr_delta[np.isfinite(arr_delta)]
-            if arr_delta.size:
-                delta_by_session[g][f][st.session] = arr_delta
+            if compute_delta:
+                arr_delta = np.asarray(vals_delta, dtype=float)
+                arr_delta = arr_delta[np.isfinite(arr_delta)]
+                if arr_delta.size:
+                    delta_by_session[g][f][st.session] = arr_delta
 
     frac_pooled = {
         "indoor": {f: pooled_all(frac_by_session["indoor"][f]) for f in feat_list},
@@ -522,15 +531,22 @@ def plot_dropone_suite(
     seed: int,
     max_scatter_points: int,
     ylim_pad_frac: float,
+    use_zscore: bool = False,
 ) -> Path:
     suffix = suffix_for_threshold(min_full_devexpl)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    ylabel = "frac(full DevExpl)"
+    title_metric = "drop-one contribution"
+    if use_zscore:
+        ylabel = "contribution z-score"
+        title_metric = "drop-one contribution z-score"
+
     plot_combined_indoor_outdoor(
         out_dir / f"BOX_dropone_frac_indoor_vs_outdoor{suffix}.png",
-        title=f"Drop-one fraction (pyramidal; full DevExpl ≥ {min_full_devexpl:g}) | whiskers/caps + jitter",
-        ylabel="frac(full DevExpl)",
+        title=f"{title_metric} (pyramidal; full DevExpl ≥ {min_full_devexpl:g}) | whiskers/caps + jitter",
+        ylabel=ylabel,
         features=features,
         data_in=plot_data.frac_pooled["indoor"],
         data_out=plot_data.frac_pooled["outdoor"],
@@ -547,8 +563,8 @@ def plot_dropone_suite(
 
     plot_single_group_sorted(
         out_dir / f"BOX_dropone_frac_indoor_only_sorted{suffix}.png",
-        title=f"Indoor only (sorted by mean) | drop-one fraction | full DevExpl ≥ {min_full_devexpl:g}",
-        ylabel="frac(full DevExpl)",
+        title=f"Indoor only (sorted by mean) | {title_metric} | full DevExpl ≥ {min_full_devexpl:g}",
+        ylabel=ylabel,
         group_label="indoor",
         features_sorted=features_indoor_sorted,
         data=plot_data.frac_pooled["indoor"],
@@ -559,8 +575,8 @@ def plot_dropone_suite(
 
     plot_single_group_sorted(
         out_dir / f"BOX_dropone_frac_outdoor_only_sorted{suffix}.png",
-        title=f"Outdoor only (sorted by mean) | drop-one fraction | full DevExpl ≥ {min_full_devexpl:g}",
-        ylabel="frac(full DevExpl)",
+        title=f"Outdoor only (sorted by mean) | {title_metric} | full DevExpl ≥ {min_full_devexpl:g}",
+        ylabel=ylabel,
         group_label="outdoor",
         features_sorted=features_outdoor_sorted,
         data=plot_data.frac_pooled["outdoor"],
@@ -582,17 +598,18 @@ def plot_dropone_suite(
             ylim_pad_frac=ylim_pad_frac,
         )
 
-        plot_combined_indoor_outdoor(
-            out_dir / f"BOX_dropone_delta_indoor_vs_outdoor{suffix}.png",
-            title=f"Drop-one ΔDevExpl (= frac×full) (pyramidal; ≥ {min_full_devexpl:g}) | whiskers/caps + jitter",
-            ylabel="ΔDevExpl",
-            features=features,
-            data_in=plot_data.delta_pooled["indoor"],
-            data_out=plot_data.delta_pooled["outdoor"],
-            seed=seed,
-            max_scatter_points=max_scatter_points,
-            ylim_pad_frac=ylim_pad_frac,
-        )
+        if not use_zscore:
+            plot_combined_indoor_outdoor(
+                out_dir / f"BOX_dropone_delta_indoor_vs_outdoor{suffix}.png",
+                title=f"Drop-one ΔDevExpl (= frac×full) (pyramidal; ≥ {min_full_devexpl:g}) | whiskers/caps + jitter",
+                ylabel="ΔDevExpl",
+                features=features,
+                data_in=plot_data.delta_pooled["indoor"],
+                data_out=plot_data.delta_pooled["outdoor"],
+                seed=seed,
+                max_scatter_points=max_scatter_points,
+                ylim_pad_frac=ylim_pad_frac,
+            )
 
     out_csv = out_dir / f"boxplot_dropone_summary{suffix}.csv"
     with open(out_csv, "w", encoding="utf-8", newline="") as f:
@@ -608,7 +625,7 @@ def plot_dropone_suite(
                 if arr.size == 0:
                     continue
                 w.writerow({
-                    "metric": "dropone_frac",
+                    "metric": "dropone_z" if use_zscore else "dropone_frac",
                     "group": grp,
                     "feature": feat,
                     "n": int(arr.size),

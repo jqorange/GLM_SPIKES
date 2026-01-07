@@ -9,6 +9,7 @@ Drop-one contribution plotting (pyramidal-only) with:
   - Optional: use --forward_modulated_only to limit each feature to neurons whose forward-search
     final model includes that feature (still pyramidal only).
   - Filter: only neurons with full DevExpl >= --min_full_devexpl enter downstream analysis
+  - By default, uses shuffle-normalized z-scores when available (use --use_raw for fractions)
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
 Inputs per session:
@@ -62,6 +63,11 @@ def main():
     ap.add_argument("--features", type=str, default=",".join(DEFAULT_FEATURES),
                     help="Comma-separated feature names to plot; others are ignored.")
     ap.add_argument(
+        "--use_raw",
+        action="store_true",
+        help="If set, plot raw drop-one fractions instead of shuffle-normalized z-scores.",
+    )
+    ap.add_argument(
         "--forward_modulated_only",
         action="store_true",
         help="If set, per-feature neurons are restricted to those whose forward-search final model includes that feature.",
@@ -71,6 +77,8 @@ def main():
     features = [s.strip() for s in args.features.split(",") if s.strip()]
     if not features:
         raise SystemExit("[FATAL] --features parsed to empty list.")
+
+    use_zscore = not args.use_raw
 
     weights_base = Path(args.weights_base)
     out_dir = weights_base / "DROPONE_SUMMARY"
@@ -85,6 +93,7 @@ def main():
             sess_dir,
             features=features,
             feature_neuron_whitelist=whitelist,
+            use_zscore=use_zscore,
         )
         if st is not None:
             sess_stats.append(st)
@@ -97,6 +106,7 @@ def main():
         sess_stats,
         features=features,
         min_full_devexpl=args.min_full_devexpl,
+        compute_delta=not use_zscore,
     )
     summary_csv = plot_dropone_suite(
         out_dir,
@@ -106,11 +116,13 @@ def main():
         seed=args.seed,
         max_scatter_points=args.max_scatter_points,
         ylim_pad_frac=args.ylim_pad_frac,
+        use_zscore=use_zscore,
     )
 
     print(f"[OK] Sessions loaded: {len(sess_stats)}")
     print(f"[OK] Features used: {features}")
     print(f"[OK] Filter: full DevExpl >= {args.min_full_devexpl:g}")
+    print(f"[OK] Contribution metric: {'z-score' if use_zscore else 'raw fraction'}")
     print(
         f"[OK] Kept neurons: indoor {plot_data.kept_counts['indoor']}/{plot_data.total_counts['indoor']}, "
         f"outdoor {plot_data.kept_counts['outdoor']}/{plot_data.total_counts['outdoor']}",
