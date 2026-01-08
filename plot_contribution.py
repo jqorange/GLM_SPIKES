@@ -39,6 +39,8 @@ import argparse
 from pathlib import Path
 from typing import List
 
+import numpy as np
+
 from contribution_utils import (
     DroponeSessionStats,
     collect_dropone_plot_data,
@@ -72,6 +74,11 @@ def main():
         action="store_true",
         help="If set, per-feature neurons are restricted to those whose forward-search final model includes that feature.",
     )
+    ap.add_argument(
+        "--positive_only",
+        action="store_true",
+        help="If set, only contributions > 0 are kept for each feature.",
+    )
     args = ap.parse_args()
 
     features = [s.strip() for s in args.features.split(",") if s.strip()]
@@ -95,6 +102,23 @@ def main():
             feature_neuron_whitelist=whitelist,
             use_zscore=use_zscore,
         )
+        if st is not None and args.positive_only:
+            filtered_frac = {}
+            filtered_shuf_mean = {}
+            filtered_shuf_std = {}
+            for feat, contrib in st.frac_by_feature.items():
+                kept = {ni: val for ni, val in contrib.items() if np.isfinite(val) and val > 0}
+                filtered_frac[feat] = kept
+                filtered_shuf_mean[feat] = {ni: val for ni, val in st.shuf_mean_by_feature.get(feat, {}).items() if ni in kept}
+                filtered_shuf_std[feat] = {ni: val for ni, val in st.shuf_std_by_feature.get(feat, {}).items() if ni in kept}
+            st = DroponeSessionStats(
+                session=st.session,
+                group=st.group,
+                full_devexpl=st.full_devexpl,
+                frac_by_feature=filtered_frac,
+                shuf_mean_by_feature=filtered_shuf_mean,
+                shuf_std_by_feature=filtered_shuf_std,
+            )
         if st is not None:
             sess_stats.append(st)
         elif args.forward_modulated_only:

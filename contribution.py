@@ -81,6 +81,7 @@ from glm_poisson_forward.io_utils import (
 
 MIN_FULL_DEVEXPL = 0.1
 N_SHUFFLE = 100
+POSITIVE_CONTRIB_ONLY = False  # if True, only contributions > 0 are kept per feature
 
 
 @dataclass
@@ -346,6 +347,24 @@ def main():
         print("[FATAL] No sessions processed successfully.")
         return
 
+    filtered_results = []
+    if POSITIVE_CONTRIB_ONLY:
+        for r in results:
+            filtered = {
+                feat: {ni: val for ni, val in contrib.items() if np.isfinite(val) and val > 0}
+                for feat, contrib in r.contrib_frac_by_feature_by_neuron.items()
+            }
+            filtered_results.append(
+                SessionResult(
+                    session=r.session,
+                    group=r.group,
+                    full_devexpl_by_neuron=r.full_devexpl_by_neuron,
+                    contrib_frac_by_feature_by_neuron=filtered,
+                )
+            )
+    else:
+        filtered_results = results
+
     plot_stats = [
         DroponeSessionStats(
             session=r.session,
@@ -355,7 +374,7 @@ def main():
             shuf_mean_by_feature={v: {} for v in VARS_ALL},
             shuf_std_by_feature={v: {} for v in VARS_ALL},
         )
-        for r in results
+        for r in filtered_results
     ]
     dropone_plot_data = collect_dropone_plot_data(
         plot_stats,
@@ -381,7 +400,7 @@ def main():
     print(f"[OK] Summary CSV: {summary_csv}")
 
     for group in ["indoor", "outdoor"]:
-        group_res = [r for r in results if r.group == group]
+        group_res = [r for r in filtered_results if r.group == group]
         if not group_res:
             print(f"[WARN] No sessions for group={group}")
             continue
