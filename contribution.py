@@ -241,10 +241,7 @@ def compute_session_dropone(
             D_red = deviance_from_ll(ll_sat, ll_red)
 
             denom = (D_null - D_full)
-            if not np.isfinite(D_red) or not np.isfinite(denom) or denom <= 0:
-                frac = float("nan")
-            else:
-                frac = float((D_red - D_full) / denom)
+            frac = float((D_red - D_full) / denom)
             contrib[v][ni] = frac
 
         shuf_full = np.full(N_SHUFFLE, np.nan, dtype=np.float64)
@@ -260,7 +257,7 @@ def compute_session_dropone(
             for v in VARS_ALL:
                 ll_red_shuf = float(np.dot(y_shuf, log_mu_red_by_feat[v]) - sum_mu_red_by_feat[v] - log_factorial_sum)
                 D_red_shuf = deviance_from_ll(ll_sat, ll_red_shuf)
-                if not np.isfinite(D_red_shuf) or not np.isfinite(denom) or denom <= 0:
+                if not np.isfinite(D_red_shuf) or not np.isfinite(denom) :
                     shuf_frac[v][s] = float("nan")
                 else:
                     shuf_frac[v][s] = float((D_red_shuf - D_full_shuf) / denom)
