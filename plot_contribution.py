@@ -92,7 +92,13 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sess_stats: List[DroponeSessionStats] = []
-    for sess_dir in sorted([p for p in weights_base.iterdir() if p.is_dir()]):
+    allowed_session_tokens = ["F5D10", "F5D2", "F5D3", "F6D10", "F6D2", "F6D3"]
+    session_dirs = [p for p in weights_base.iterdir() if p.is_dir()]
+    session_dirs = [
+        p for p in session_dirs
+        if any(token in p.name for token in allowed_session_tokens)
+    ]
+    for sess_dir in sorted(session_dirs):
         whitelist = None
         if args.forward_modulated_only:
             whitelist = load_forward_selected_neurons(sess_dir, features=features)
