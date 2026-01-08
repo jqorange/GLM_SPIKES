@@ -355,6 +355,8 @@ def main():
             group=r.group,
             full_devexpl=r.full_devexpl_by_neuron,
             frac_by_feature=r.contrib_frac_by_feature_by_neuron,
+            shuf_mean_by_feature={v: {} for v in VARS_ALL},
+            shuf_std_by_feature={v: {} for v in VARS_ALL},
         )
         for r in results
     ]
