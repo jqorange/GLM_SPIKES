@@ -26,6 +26,8 @@ class DroponeSessionStats:
     group: str  # indoor/outdoor
     full_devexpl: Dict[int, float]  # neuron_idx -> full DevExpl
     frac_by_feature: Dict[str, Dict[int, float]]  # feature -> neuron_idx -> frac
+    shuf_mean_by_feature: Dict[str, Dict[int, float]]  # feature -> neuron_idx -> shuffle mean (frac)
+    shuf_std_by_feature: Dict[str, Dict[int, float]]  # feature -> neuron_idx -> shuffle std (frac)
 
 
 @dataclass
@@ -33,6 +35,7 @@ class DroponePlotData:
     frac_pooled: Dict[str, Dict[str, np.ndarray]]
     delta_pooled: Dict[str, Dict[str, np.ndarray]]
     full_pooled: Dict[str, Dict[str, np.ndarray]]
+    shuf95_pooled: Dict[str, Dict[str, np.ndarray]]
     kept_counts: Dict[str, int]
     total_counts: Dict[str, int]
 
@@ -172,12 +175,16 @@ def load_dropone_session_stats(
             full_dev[idx] = float(val)
 
     frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_mean: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_std: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
     for r in contrib_rows:
         feat = str(r.get("feature", "")).strip()
         if feat not in frac:
             continue
         allowed = whitelist.get(feat, None) if whitelist is not None else None
         ni = r.get("neuron_idx", None)
+        mu = r.get("frac_shuf_mean", None)
+        std = r.get("frac_shuf_std", None)
         if use_zscore:
             fv = r.get("frac_z", None)
             if fv is None:
@@ -195,11 +202,24 @@ def load_dropone_session_stats(
         val = _safe_float(fv)
         if np.isfinite(val):
             frac[feat][idx] = float(val)
+        mu_val = _safe_float(mu)
+        if np.isfinite(mu_val):
+            shuf_mean[feat][idx] = float(mu_val)
+        std_val = _safe_float(std)
+        if np.isfinite(std_val):
+            shuf_std[feat][idx] = float(std_val)
 
     if all(len(frac[f]) == 0 for f in feat_list):
         return None
 
-    return DroponeSessionStats(session=session, group=group, full_devexpl=full_dev, frac_by_feature=frac)
+    return DroponeSessionStats(
+        session=session,
+        group=group,
+        full_devexpl=full_dev,
+        frac_by_feature=frac,
+        shuf_mean_by_feature=shuf_mean,
+        shuf_std_by_feature=shuf_std,
+    )
 
 
 def pooled_all(values_by_session: Dict[str, np.ndarray]) -> np.ndarray:
@@ -228,6 +248,7 @@ def collect_dropone_plot_data(
     frac_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
     full_by_session: Dict[str, Dict[str, np.ndarray]] = {"indoor": {}, "outdoor": {}}
     delta_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
+    shuf95_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
 
     kept_counts = {"indoor": 0, "outdoor": 0}
     total_counts = {"indoor": 0, "outdoor": 0}
@@ -261,6 +282,7 @@ def collect_dropone_plot_data(
 
             vals_frac = []
             vals_delta = []
+            vals_shuf95 = []
             for ni, fracv in m.items():
                 if ni not in eligible:
                     continue
@@ -269,6 +291,10 @@ def collect_dropone_plot_data(
                     vals_frac.append(float(fracv))
                     if compute_delta:
                         vals_delta.append(float(fracv) * float(dv))
+                mu = st.shuf_mean_by_feature.get(f, {}).get(ni, np.nan)
+                std = st.shuf_std_by_feature.get(f, {}).get(ni, np.nan)
+                if np.isfinite(mu) and np.isfinite(std) and std > 0:
+                    vals_shuf95.append(float(mu + 1.644854 * std))
 
             arr_frac = np.asarray(vals_frac, dtype=float)
             arr_frac = arr_frac[np.isfinite(arr_frac)]
@@ -280,6 +306,10 @@ def collect_dropone_plot_data(
                 arr_delta = arr_delta[np.isfinite(arr_delta)]
                 if arr_delta.size:
                     delta_by_session[g][f][st.session] = arr_delta
+            arr_shuf95 = np.asarray(vals_shuf95, dtype=float)
+            arr_shuf95 = arr_shuf95[np.isfinite(arr_shuf95)]
+            if arr_shuf95.size:
+                shuf95_by_session[g][f][st.session] = arr_shuf95
 
     frac_pooled = {
         "indoor": {f: pooled_all(frac_by_session["indoor"][f]) for f in feat_list},
@@ -293,11 +323,16 @@ def collect_dropone_plot_data(
         "indoor": {"FULL": pooled_all(full_by_session["indoor"])},
         "outdoor": {"FULL": pooled_all(full_by_session["outdoor"])},
     }
+    shuf95_pooled = {
+        "indoor": {f: pooled_all(shuf95_by_session["indoor"][f]) for f in feat_list},
+        "outdoor": {f: pooled_all(shuf95_by_session["outdoor"][f]) for f in feat_list},
+    }
 
     return DroponePlotData(
         frac_pooled=frac_pooled,
         delta_pooled=delta_pooled,
         full_pooled=full_pooled,
+        shuf95_pooled=shuf95_pooled,
         kept_counts=kept_counts,
         total_counts=total_counts,
     )
@@ -352,6 +387,7 @@ def plot_combined_indoor_outdoor(
     seed: int,
     max_scatter_points: int,
     ylim_pad_frac: float,
+    shuffle95_line: Optional[float] = None,
 ):
     rng = np.random.default_rng(seed)
 
@@ -429,6 +465,9 @@ def plot_combined_indoor_outdoor(
         loc="upper right",
     )
 
+    if shuffle95_line is not None and np.isfinite(shuffle95_line):
+        ax.axhline(shuffle95_line, linestyle="--", linewidth=1.2, color="red", alpha=0.8)
+
     set_ylim_from_boxplot(bp, ax, pad_frac=ylim_pad_frac)
 
     fig.tight_layout()
@@ -448,6 +487,7 @@ def plot_single_group_sorted(
     seed: int,
     max_scatter_points: int,
     ylim_pad_frac: float,
+    shuffle95_line: Optional[float] = None,
 ):
     rng = np.random.default_rng(seed)
 
@@ -501,6 +541,9 @@ def plot_single_group_sorted(
         loc="upper right",
     )
 
+    if shuffle95_line is not None and np.isfinite(shuffle95_line):
+        ax.axhline(shuffle95_line, linestyle="--", linewidth=1.2, color="red", alpha=0.8)
+
     set_ylim_from_boxplot(bp, ax, pad_frac=ylim_pad_frac)
 
     fig.tight_layout()
@@ -543,6 +586,29 @@ def plot_dropone_suite(
         ylabel = "contribution z-score"
         title_metric = "drop-one contribution z-score"
 
+    z95 = 1.644854
+    if use_zscore:
+        shuffle95_combined = z95
+        shuffle95_indoor = z95
+        shuffle95_outdoor = z95
+    else:
+        combined_vals = []
+        indoor_vals = []
+        outdoor_vals = []
+        for f in features:
+            if plot_data.shuf95_pooled["indoor"][f].size:
+                indoor_vals.append(plot_data.shuf95_pooled["indoor"][f])
+                combined_vals.append(plot_data.shuf95_pooled["indoor"][f])
+            if plot_data.shuf95_pooled["outdoor"][f].size:
+                outdoor_vals.append(plot_data.shuf95_pooled["outdoor"][f])
+                combined_vals.append(plot_data.shuf95_pooled["outdoor"][f])
+        combined = np.concatenate(combined_vals, axis=0) if combined_vals else np.array([], dtype=float)
+        indoor = np.concatenate(indoor_vals, axis=0) if indoor_vals else np.array([], dtype=float)
+        outdoor = np.concatenate(outdoor_vals, axis=0) if outdoor_vals else np.array([], dtype=float)
+        shuffle95_combined = float(np.nanmedian(combined)) if combined.size else None
+        shuffle95_indoor = float(np.nanmedian(indoor)) if indoor.size else None
+        shuffle95_outdoor = float(np.nanmedian(outdoor)) if outdoor.size else None
+
     plot_combined_indoor_outdoor(
         out_dir / f"BOX_dropone_frac_indoor_vs_outdoor{suffix}.png",
         title=f"{title_metric} (pyramidal; full DevExpl ≥ {min_full_devexpl:g}) | whiskers/caps + jitter",
@@ -553,6 +619,7 @@ def plot_dropone_suite(
         seed=seed,
         max_scatter_points=max_scatter_points,
         ylim_pad_frac=ylim_pad_frac,
+        shuffle95_line=shuffle95_combined,
     )
 
     indoor_means = group_feature_means(plot_data.frac_pooled["indoor"], features)
@@ -571,6 +638,7 @@ def plot_dropone_suite(
         seed=seed,
         max_scatter_points=max_scatter_points,
         ylim_pad_frac=ylim_pad_frac,
+        shuffle95_line=shuffle95_indoor,
     )
 
     plot_single_group_sorted(
@@ -583,6 +651,7 @@ def plot_dropone_suite(
         seed=seed,
         max_scatter_points=max_scatter_points,
         ylim_pad_frac=ylim_pad_frac,
+        shuffle95_line=shuffle95_outdoor,
     )
 
     if plot_data.has_full:
