@@ -70,6 +70,34 @@ def _plot_single_speed(out_path: Path, speed_curve: np.ndarray, title: str) -> N
     plt.close(fig)
 
 
+def plot_paired_speed_curve(
+    out_path: Path,
+    indoor_curve: np.ndarray,
+    outdoor_curve: np.ndarray,
+    title: str,
+    indoor_color: str = "#1f77b4",
+    outdoor_color: str = "#d62728",
+) -> None:
+    edges = np.linspace(SPEED_MIN_M_S, SPEED_MAX_M_S, SPEED_N_BINS + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    indoor = np.nan_to_num(indoor_curve, nan=0.0)
+    outdoor = np.nan_to_num(outdoor_curve, nan=0.0)
+
+    fig, ax = plt.subplots(figsize=(6.0, 5.0))
+    ax.plot(centers, indoor, linewidth=2, color=indoor_color, label="indoor")
+    ax.plot(centers, outdoor, linewidth=2, color=outdoor_color, label="outdoor")
+    ax.fill_between(centers, indoor, alpha=0.15, color=indoor_color)
+    ax.fill_between(centers, outdoor, alpha=0.15, color=outdoor_color)
+    ax.set_title(title)
+    ax.set_xlabel("Speed (m/s)")
+    ax.set_ylabel("Rate (Hz)")
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_neuron_summary(
     out_dir: Path,
     neuron_idx: int,
