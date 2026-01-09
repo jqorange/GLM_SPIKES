@@ -159,11 +159,13 @@ def plot_paired_polar_curve(
     title: str,
     indoor_color: str = "#1f77b4",
     outdoor_color: str = "#d62728",
+    equalize_area: bool = True,
 ) -> None:
     theta_rad = np.deg2rad(theta_deg)
     indoor = np.nan_to_num(indoor_curve, nan=0.0)
     outdoor = np.nan_to_num(outdoor_curve, nan=0.0)
-    indoor, outdoor = _equalize_polar_area(theta_rad, indoor, outdoor)
+    if equalize_area:
+        indoor, outdoor = _equalize_polar_area(theta_rad, indoor, outdoor)
     theta_c = np.concatenate([theta_rad, theta_rad[:1]])
     indoor_c = np.concatenate([indoor, indoor[:1]])
     outdoor_c = np.concatenate([outdoor, outdoor[:1]])

@@ -6,7 +6,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import N_WORKERS, OUT_ROOT, REBUILD_PAIRED_POLAR_PLOTS, SCORE_PERCENTILES, SHUFFLE_N
+from .config import (
+    EQUALIZE_POLAR_AREA,
+    N_WORKERS,
+    OUT_ROOT,
+    REBUILD_PAIRED_POLAR_PLOTS,
+    SCORE_PERCENTILES,
+    SHUFFLE_N,
+)
 from .io_utils import list_sessions_all, load_session_raw
 from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve, plot_paired_speed_curve
 from .tuning_scores import (
@@ -120,6 +127,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["hd_curve"],
         curves_b["hd_curve"],
         "Yaw tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     plot_paired_polar_curve(
         neuron_dir_a / "roll_indoor_outdoor.png",
@@ -127,6 +135,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["roll_curve"],
         curves_b["roll_curve"],
         "Roll tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     plot_paired_polar_curve(
         neuron_dir_a / "pitch_indoor_outdoor.png",
@@ -134,6 +143,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["pitch_curve"],
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     if "speed_curve" in curves_a and "speed_curve" in curves_b:
         plot_paired_speed_curve(
@@ -148,6 +158,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["hd_curve"],
         curves_b["hd_curve"],
         "Yaw tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     plot_paired_polar_curve(
         neuron_dir_b / "roll_indoor_outdoor.png",
@@ -155,6 +166,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["roll_curve"],
         curves_b["roll_curve"],
         "Roll tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     plot_paired_polar_curve(
         neuron_dir_b / "pitch_indoor_outdoor.png",
@@ -162,6 +174,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_a["pitch_curve"],
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
+        equalize_area=EQUALIZE_POLAR_AREA,
     )
     if "speed_curve" in curves_a and "speed_curve" in curves_b:
         plot_paired_speed_curve(
