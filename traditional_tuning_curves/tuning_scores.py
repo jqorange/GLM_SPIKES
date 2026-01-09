@@ -12,6 +12,7 @@ from .config import (
     ANGULAR_K_MAX,
     BIN_SEC,
     BIN_SMOOTH_SIGMA_BINS,
+    MIN_BIN_OCCUPANCY_SEC,
     RATE_SMOOTH_SIGMA_BINS,
     SHUFFLE_MIN_SEC,
     SPEED_MAX_M_S,
@@ -115,8 +116,9 @@ def rate_map_2d(
 
     occupancy_sec = occupancy * BIN_SEC
     rate_map = np.full_like(occupancy_sec, np.nan, dtype=np.float64)
+    valid = occupancy_sec >= MIN_BIN_OCCUPANCY_SEC
     with np.errstate(invalid="ignore", divide="ignore"):
-        rate_map[occupancy_sec > 0] = spike_map[occupancy_sec > 0] / occupancy_sec[occupancy_sec > 0]
+        rate_map[valid] = spike_map[valid] / occupancy_sec[valid]
     return rate_map, occupancy_sec
 
 
@@ -134,8 +136,9 @@ def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -
 
     occ_sec = occ * BIN_SEC
     rate = np.full(ANGLE_N_BINS, np.nan, dtype=np.float64)
+    valid = occ_sec >= MIN_BIN_OCCUPANCY_SEC
     with np.errstate(invalid="ignore", divide="ignore"):
-        rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
+        rate[valid] = spk[valid] / occ_sec[valid]
 
     rate = np.nan_to_num(rate, nan=0.0)
     bin_deg = 360.0 / ANGLE_N_BINS
@@ -182,8 +185,9 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
 
     occ_sec = occ * BIN_SEC
     rate = np.full(SPEED_N_BINS, np.nan, dtype=np.float64)
+    valid = occ_sec >= MIN_BIN_OCCUPANCY_SEC
     with np.errstate(invalid="ignore", divide="ignore"):
-        rate[occ_sec > 0] = spk[occ_sec > 0] / occ_sec[occ_sec > 0]
+        rate[valid] = spk[valid] / occ_sec[valid]
     rate = np.nan_to_num(rate, nan=0.0)
     sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
