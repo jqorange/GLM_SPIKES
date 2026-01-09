@@ -28,6 +28,7 @@ SCORE_PERCENTILES = {
 RATE_SMOOTH_SIGMA_BINS = 10.0
 # Bin-wise smoothing for tuning curves (fixed for visualization)
 BIN_SMOOTH_SIGMA_BINS = 2.0
+MIN_BIN_OCCUPANCY_SEC = 5.0
 
 # Angular k-fold vector length (1..K)
 ANGULAR_K_MAX = 5
