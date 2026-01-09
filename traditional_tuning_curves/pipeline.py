@@ -8,7 +8,7 @@ import pandas as pd
 
 from .config import N_WORKERS, OUT_ROOT, REBUILD_PAIRED_POLAR_PLOTS, SCORE_PERCENTILES, SHUFFLE_N
 from .io_utils import list_sessions_all, load_session_raw
-from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve
+from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve, plot_paired_speed_curve
 from .tuning_scores import (
     ScoreResult,
     SessionBinning,
@@ -66,6 +66,7 @@ def _save_polar_curves(out_dir: Path, aux: dict[str, np.ndarray]) -> None:
         hd_curve=aux["hd_curve"],
         roll_curve=aux["roll_curve"],
         pitch_curve=aux["pitch_curve"],
+        speed_curve=aux["speed_curve"],
     )
 
 
@@ -74,11 +75,14 @@ def _load_polar_curves(out_dir: Path) -> dict[str, np.ndarray] | None:
     if not path.exists():
         return None
     data = np.load(path)
-    return {
+    curves = {
         "hd_curve": data["hd_curve"],
         "roll_curve": data["roll_curve"],
         "pitch_curve": data["pitch_curve"],
     }
+    if "speed_curve" in data:
+        curves["speed_curve"] = data["speed_curve"]
+    return curves
 
 
 def _find_session_pairs(sessions: list[str]) -> list[tuple[str, str]]:
@@ -131,6 +135,13 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
     )
+    if "speed_curve" in curves_a and "speed_curve" in curves_b:
+        plot_paired_speed_curve(
+            neuron_dir_a / "speed_indoor_outdoor.png",
+            curves_a["speed_curve"],
+            curves_b["speed_curve"],
+            "Speed tuning (indoor vs outdoor)",
+        )
     plot_paired_polar_curve(
         neuron_dir_b / "yaw_indoor_outdoor.png",
         theta_deg,
@@ -152,6 +163,13 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
     )
+    if "speed_curve" in curves_a and "speed_curve" in curves_b:
+        plot_paired_speed_curve(
+            neuron_dir_b / "speed_indoor_outdoor.png",
+            curves_a["speed_curve"],
+            curves_b["speed_curve"],
+            "Speed tuning (indoor vs outdoor)",
+        )
 
 
 def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: int = SHUFFLE_N) -> Path:
