@@ -130,6 +130,11 @@ def compute_session_rllr(
         print(f"[SKIP] {session}: no pyramidal neurons with forward-selected models")
         return None
 
+    print(
+        f"[INFO] {session}: pyramidal neurons={pyr_idx.size}, "
+        f"with forward-selected models={len(pyr_models)}",
+    )
+
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)
     folds_idx = list(kf.split(np.arange(T)))
 
@@ -197,6 +202,15 @@ def compute_session_rllr(
 
     rng = np.random.default_rng(SEED)
 
+    missing_full_model_dir = 0
+    missing_full_weights = 0
+    failed_full_predict = 0
+    full_processed = 0
+    total_drop_models = 0
+    missing_drop_model_dir = 0
+    missing_drop_weights = 0
+    failed_drop_predict = 0
+
     for ni, full_vars in pyr_models.items():
         y = Y_all[:, ni].astype(np.float64)
         mu0_oof = build_oof_intercept_mu(y, folds_idx)
@@ -207,16 +221,21 @@ def compute_session_rllr(
         model_dir_full = find_saved_model_dir(mk_full)
         if model_dir_full is None:
             print(f"[SKIP] {session}: missing saved weights for full model {mk_full} (neuron_{ni+1})")
+            missing_full_model_dir += 1
             continue
         if not neuron_weights_ready(model_dir_full, ni):
+            print(f"[SKIP] {session}: incomplete weights for full model {mk_full} (neuron_{ni+1})")
+            missing_full_weights += 1
             continue
         try:
             mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
         except Exception as exc:
             print(f"[SKIP] {session}: failed loading full model {mk_full} (neuron_{ni+1}): {exc}")
+            failed_full_predict += 1
             continue
         ll_full = poisson_loglik(y, mu_oof_full)
         ll_full_by_neuron[ni] = float(ll_full)
+        full_processed += 1
 
         ll_gain = float(ll_full - ll0)
         full_ll_gain_by_neuron[ni] = ll_gain
@@ -229,14 +248,18 @@ def compute_session_rllr(
             X_red, feats_red, mk_red = get_X(drop_vars)
             model_dir_red = find_saved_model_dir(mk_red)
             if model_dir_red is None:
+                missing_drop_model_dir += 1
                 continue
             if not neuron_weights_ready(model_dir_red, ni):
+                missing_drop_weights += 1
                 continue
             try:
                 mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
                 mu_oof_red_by_feat[v] = mu_red
             except Exception as exc:
                 print(f"[WARN] {session}: failed loading drop model {mk_red} (neuron_{ni+1}): {exc}")
+                failed_drop_predict += 1
+            total_drop_models += 1
 
         denom = ll_full - ll0
         for v in full_vars:
@@ -282,21 +305,35 @@ def compute_session_rllr(
             z = float("nan") if (not np.isfinite(std) or std <= 0 or not np.isfinite(real)) else float((real - mu) / std)
             contrib_shuffle_stats[v][ni] = (mu, std, z)
 
+    df_full_rows = [
+        {
+            "session": session,
+            "group": group,
+            "neuron_idx": ni,
+            "ll_full": ll_full_by_neuron[ni],
+            "ll0": ll0_by_neuron[ni],
+            "ll_gain": full_ll_gain_by_neuron[ni],
+            "ll_gain_shuf_mean": full_shuffle_stats[ni][0],
+            "ll_gain_shuf_std": full_shuffle_stats[ni][1],
+            "ll_gain_z": full_shuffle_stats[ni][2],
+        }
+        for ni in sorted(full_ll_gain_by_neuron.keys())
+    ]
+    if not df_full_rows:
+        print(f"[WARN] {session}: no full-model rows produced; check weights and inputs")
     df_full = pd.DataFrame(
-        [
-            {
-                "session": session,
-                "group": group,
-                "neuron_idx": ni,
-                "ll_full": ll_full_by_neuron[ni],
-                "ll0": ll0_by_neuron[ni],
-                "ll_gain": full_ll_gain_by_neuron[ni],
-                "ll_gain_shuf_mean": full_shuffle_stats[ni][0],
-                "ll_gain_shuf_std": full_shuffle_stats[ni][1],
-                "ll_gain_z": full_shuffle_stats[ni][2],
-            }
-            for ni in sorted(full_ll_gain_by_neuron.keys())
-        ]
+        df_full_rows,
+        columns=[
+            "session",
+            "group",
+            "neuron_idx",
+            "ll_full",
+            "ll0",
+            "ll_gain",
+            "ll_gain_shuf_mean",
+            "ll_gain_shuf_std",
+            "ll_gain_z",
+        ],
     )
     df_full.to_csv(full_csv, index=False)
 
@@ -316,7 +353,34 @@ def compute_session_rllr(
                     "rllr_z": z,
                 }
             )
-    pd.DataFrame(rows).to_csv(contrib_csv, index=False)
+    if not rows:
+        print(f"[WARN] {session}: no drop-one rows produced; check reduced models and weights")
+    pd.DataFrame(
+        rows,
+        columns=[
+            "session",
+            "group",
+            "feature",
+            "neuron_idx",
+            "rllr",
+            "rllr_shuf_mean",
+            "rllr_shuf_std",
+            "rllr_z",
+        ],
+    ).to_csv(contrib_csv, index=False)
+
+    print(
+        f"[INFO] {session}: full processed={full_processed}, "
+        f"missing full model dir={missing_full_model_dir}, "
+        f"missing full weights={missing_full_weights}, "
+        f"failed full predict={failed_full_predict}"
+    )
+    print(
+        f"[INFO] {session}: drop models attempted={total_drop_models}, "
+        f"missing drop model dir={missing_drop_model_dir}, "
+        f"missing drop weights={missing_drop_weights}, "
+        f"failed drop predict={failed_drop_predict}"
+    )
 
     contrib_z: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
     for v in VARS_ALL:
