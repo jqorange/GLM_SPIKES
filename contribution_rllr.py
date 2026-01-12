@@ -5,7 +5,8 @@ Compute Poisson-GLM drop-one contributions using rLLR normalization with forward
 (full) models. Full model is the forward-search-selected subset per neuron; drop-one
 models remove a single covariate from that subset. Contributions are optionally z-scored
 against a label-shuffle baseline. This pipeline reuses saved 10-fold weights from
-GLM_Poisson_forward and does not refit models.
+GLM_Poisson_forward. Drop-one models are (re)fit per neuron and cached under a
+drop_one/ folder for reuse.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from contribution_utils import (
     load_fold_weights,
     pyramidal_indices_for_session,
     predict_oof_from_saved_weights,
+    save_weights_for_model,
 )
 from glm_poisson_forward.config import (
     CV_FOLDS,
@@ -229,6 +231,9 @@ def compute_session_rllr(
     missing_drop_weights = 0
     failed_drop_predict = 0
 
+    dropone_root = WEIGHTS_BASE / "drop_one" / session
+    dropone_root.mkdir(parents=True, exist_ok=True)
+
     for ni, full_vars in pyr_models.items():
         y = Y_all[:, ni].astype(np.float64)
         mu0_oof = build_oof_intercept_mu(y, folds_idx)
@@ -264,10 +269,20 @@ def compute_session_rllr(
             if not drop_vars:
                 continue
             X_red, feats_red, mk_red = get_X(drop_vars)
-            model_dir_red = find_saved_model_dir(mk_red)
-            if model_dir_red is None:
+            model_dir_red = dropone_root / f"neuron_{ni + 1}" / mk_red
+            if not model_dir_red.exists():
                 missing_drop_model_dir += 1
-                continue
+            if not neuron_weights_ready(model_dir_red, ni):
+                save_weights_for_model(
+                    model_dir=model_dir_red,
+                    feature_names=feats_red,
+                    X_all=X_red,
+                    Y_all=Y_all,
+                    folds_idx=folds_idx,
+                    neuron_indices=np.array([ni], dtype=int),
+                    n_jobs=1,
+                    folds_count=len(folds_idx),
+                )
             if not neuron_weights_ready(model_dir_red, ni):
                 missing_drop_weights += 1
                 continue
