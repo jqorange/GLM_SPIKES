@@ -151,6 +151,20 @@ def compute_session_rllr(
                 return cand
         return None
 
+    def neuron_weights_ready(model_dir: Path, neuron_idx: int) -> bool:
+        idx1 = neuron_idx + 1
+        neuron_dir = model_dir / f"neuron_{idx1}"
+        if not neuron_dir.exists():
+            return False
+        weights_mean = neuron_dir / "weights_mean.csv"
+        if (not weights_mean.exists()) or weights_mean.stat().st_size < 8:
+            return False
+        for k in range(1, CV_FOLDS + 1):
+            csv_path = neuron_dir / f"fold{k}" / "weights.csv"
+            if (not csv_path.exists()) or csv_path.stat().st_size < 8:
+                return False
+        return True
+
     stats_root = sess_dir / RLLR_STATS_DIRNAME
     stats_root.mkdir(parents=True, exist_ok=True)
 
@@ -194,6 +208,8 @@ def compute_session_rllr(
         if model_dir_full is None:
             print(f"[SKIP] {session}: missing saved weights for full model {mk_full} (neuron_{ni+1})")
             continue
+        if not neuron_weights_ready(model_dir_full, ni):
+            continue
         try:
             mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
         except Exception as exc:
@@ -213,6 +229,8 @@ def compute_session_rllr(
             X_red, feats_red, mk_red = get_X(drop_vars)
             model_dir_red = find_saved_model_dir(mk_red)
             if model_dir_red is None:
+                continue
+            if not neuron_weights_ready(model_dir_red, ni):
                 continue
             try:
                 mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
