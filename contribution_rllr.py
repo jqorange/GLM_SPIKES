@@ -39,6 +39,8 @@ from contribution_rllr_utils import (
 )
 from contribution_utils import (
     build_dayid_to_cellinfo,
+    load_feature_names_file,
+    load_fold_weights,
     pyramidal_indices_for_session,
     predict_oof_from_saved_weights,
 )
@@ -161,12 +163,28 @@ def compute_session_rllr(
         neuron_dir = model_dir / f"neuron_{idx1}"
         if not neuron_dir.exists():
             return False
-        weights_mean = neuron_dir / "weights_mean.csv"
-        if (not weights_mean.exists()) or weights_mean.stat().st_size < 8:
-            return False
         for k in range(1, CV_FOLDS + 1):
             csv_path = neuron_dir / f"fold{k}" / "weights.csv"
             if (not csv_path.exists()) or csv_path.stat().st_size < 8:
+                return False
+        weights_mean = neuron_dir / "weights_mean.csv"
+        if (not weights_mean.exists()) or weights_mean.stat().st_size < 8:
+            saved_feats = load_feature_names_file(model_dir)
+            if not saved_feats:
+                return False
+            try:
+                weights = []
+                for k in range(1, CV_FOLDS + 1):
+                    csv_path = neuron_dir / f"fold{k}" / "weights.csv"
+                    weights.append(load_fold_weights(csv_path, feature_names=saved_feats))
+                w_mean = np.mean(np.stack(weights, axis=0), axis=0).astype(np.float32)
+                pd.DataFrame(
+                    w_mean.reshape(1, -1),
+                    index=[f"neuron_{idx1}"],
+                    columns=saved_feats,
+                ).to_csv(weights_mean)
+            except Exception as exc:
+                print(f"[WARN] {session}: failed computing weights_mean for neuron_{idx1}: {exc}")
                 return False
         return True
 
