@@ -36,12 +36,32 @@ def ensure_feature_names_file(model_dir: Path, feature_names: List[str]):
             json.dump(feature_names, f, indent=2)
 
 
+def _load_feature_mapping_file(model_dir: Path) -> List[str] | None:
+    mapping_path = model_dir / "feature_mapping.txt"
+    if not mapping_path.exists():
+        return None
+    mapping: Dict[int, str] = {}
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            idx_str, name = line.split(":", 1)
+            try:
+                idx = int(idx_str.strip())
+            except ValueError:
+                continue
+            mapping[idx] = name.strip()
+    if not mapping:
+        return None
+    return [mapping[i] for i in sorted(mapping)]
+
+
 def load_feature_names_file(model_dir: Path) -> List[str] | None:
     p = model_dir / "feature_names.json"
-    if not p.exists():
-        return None
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if p.exists():
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return _load_feature_mapping_file(model_dir)
 
 
 def fit_one_fold_weights(
