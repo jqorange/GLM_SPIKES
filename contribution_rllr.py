@@ -4,7 +4,8 @@
 Compute Poisson-GLM drop-one contributions using rLLR normalization with forward-selected
 (full) models. Full model is the forward-search-selected subset per neuron; drop-one
 models remove a single covariate from that subset. Contributions are optionally z-scored
-against a label-shuffle baseline.
+against a label-shuffle baseline. This pipeline reuses saved 10-fold weights from
+GLM_Poisson_forward and does not refit models.
 """
 
 from __future__ import annotations
@@ -40,9 +41,7 @@ from contribution_utils import (
     build_dayid_to_cellinfo,
     pyramidal_indices_for_session,
     predict_oof_from_saved_weights,
-    save_weights_for_model,
 )
-from contribution_utils.weights import model_key_from_vars
 from glm_poisson_forward.config import (
     CV_FOLDS,
     DLC_ROOT,
@@ -55,7 +54,7 @@ from glm_poisson_forward.config import (
     VARS_ALL,
     WEIGHTS_BASE,
 )
-from glm_poisson_forward.design_matrix import build_design_matrix
+from glm_poisson_forward.design_matrix import build_design_matrix, model_key_from_vars as forward_model_key
 from glm_poisson_forward.io_utils import (
     list_sessions_dlc_final,
     list_sessions_imu,
@@ -137,7 +136,7 @@ def compute_session_rllr(
     X_cache: Dict[str, Tuple[np.ndarray, List[str], str]] = {}
 
     def get_X(model_vars: List[str]):
-        mk = model_key_from_vars(model_vars)
+        mk = forward_model_key(model_vars)
         if mk in X_cache:
             X, feats, _ = X_cache[mk]
             return X, feats, mk
@@ -145,38 +144,12 @@ def compute_session_rllr(
         X_cache[mk] = (X, feats, mk)
         return X, feats, mk
 
-    model_neurons: Dict[str, Dict[str, object]] = {}
-
-    for ni, full_vars in pyr_models.items():
-        if not full_vars:
-            continue
-        _, _, mk_full = get_X(full_vars)
-        model_neurons.setdefault(mk_full, {"vars": full_vars, "neurons": set()})["neurons"].add(ni)
-        for v in full_vars:
-            drop_vars = [x for x in full_vars if x != v]
-            if not drop_vars:
-                continue
-            _, _, mk_drop = get_X(drop_vars)
-            model_neurons.setdefault(mk_drop, {"vars": drop_vars, "neurons": set()})["neurons"].add(ni)
-
-    fits_root = sess_dir / RLLR_FITS_DIRNAME
-    fits_root.mkdir(parents=True, exist_ok=True)
-
-    for mk, meta in model_neurons.items():
-        model_vars = meta["vars"]
-        neuron_indices = np.array(sorted(meta["neurons"]), dtype=int)
-        X, feats, _ = get_X(model_vars)
-        model_dir = fits_root / mk
-        save_weights_for_model(
-            model_dir=model_dir,
-            feature_names=feats,
-            X_all=X,
-            Y_all=Y_all,
-            folds_idx=folds_idx,
-            neuron_indices=neuron_indices,
-            n_jobs=n_jobs,
-            folds_count=len(folds_idx),
-        )
+    def find_saved_model_dir(model_key: str) -> Optional[Path]:
+        candidates = [sess_dir / model_key, sess_dir / RLLR_FITS_DIRNAME / model_key]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        return None
 
     stats_root = sess_dir / RLLR_STATS_DIRNAME
     stats_root.mkdir(parents=True, exist_ok=True)
@@ -217,8 +190,15 @@ def compute_session_rllr(
         ll0_by_neuron[ni] = float(ll0)
 
         X_full, feats_full, mk_full = get_X(full_vars)
-        model_dir_full = fits_root / mk_full
-        mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
+        model_dir_full = find_saved_model_dir(mk_full)
+        if model_dir_full is None:
+            print(f"[SKIP] {session}: missing saved weights for full model {mk_full} (neuron_{ni+1})")
+            continue
+        try:
+            mu_oof_full = predict_oof_from_saved_weights(model_dir_full, X_full, feats_full, folds_idx, ni)
+        except Exception as exc:
+            print(f"[SKIP] {session}: failed loading full model {mk_full} (neuron_{ni+1}): {exc}")
+            continue
         ll_full = poisson_loglik(y, mu_oof_full)
         ll_full_by_neuron[ni] = float(ll_full)
 
@@ -231,19 +211,24 @@ def compute_session_rllr(
             if not drop_vars:
                 continue
             X_red, feats_red, mk_red = get_X(drop_vars)
-            model_dir_red = fits_root / mk_red
-            mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
-            mu_oof_red_by_feat[v] = mu_red
+            model_dir_red = find_saved_model_dir(mk_red)
+            if model_dir_red is None:
+                continue
+            try:
+                mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
+                mu_oof_red_by_feat[v] = mu_red
+            except Exception as exc:
+                print(f"[WARN] {session}: failed loading drop model {mk_red} (neuron_{ni+1}): {exc}")
 
         denom = ll_full - ll0
         for v in full_vars:
             if denom <= 0 or not np.isfinite(denom):
                 contrib[v][ni] = float("nan")
                 continue
-            if v in mu_oof_red_by_feat:
-                ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
-            else:
-                ll_red = ll0
+            if v not in mu_oof_red_by_feat:
+                contrib[v][ni] = float("nan")
+                continue
+            ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
             contrib[v][ni] = float((ll_full - ll_red) / denom)
 
         shuf_full = np.full(N_SHUFFLE, np.nan, dtype=np.float64)
@@ -257,14 +242,14 @@ def compute_session_rllr(
 
             denom_shuf = ll_full_shuf - ll0_shuf
             for v in full_vars:
-                if v in mu_oof_red_by_feat:
-                    ll_red_shuf = poisson_loglik(y_shuf, mu_oof_red_by_feat[v])
-                else:
-                    ll_red_shuf = ll0_shuf
                 if not np.isfinite(denom_shuf) or denom_shuf <= 0:
                     shuf_frac[v][s] = float("nan")
-                else:
-                    shuf_frac[v][s] = float((ll_full_shuf - ll_red_shuf) / denom_shuf)
+                    continue
+                if v not in mu_oof_red_by_feat:
+                    shuf_frac[v][s] = float("nan")
+                    continue
+                ll_red_shuf = poisson_loglik(y_shuf, mu_oof_red_by_feat[v])
+                shuf_frac[v][s] = float((ll_full_shuf - ll_red_shuf) / denom_shuf)
 
         full_mu = float(np.nanmean(shuf_full))
         full_std = float(np.nanstd(shuf_full, ddof=1))
