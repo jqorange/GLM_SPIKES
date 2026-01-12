@@ -39,6 +39,7 @@ from contribution_rllr_utils import (
     plot_summary_figure,
     poisson_loglik,
 )
+from glm_poisson_forward.metrics import compute_llhi_bps_poisson
 from contribution_utils import (
     build_dayid_to_cellinfo,
     load_feature_names_file,
@@ -71,6 +72,7 @@ from glm_poisson_forward.io_utils import (
 )
 
 MIN_FULL_LL_GAIN = 0.0
+MIN_FULL_LLHI = 0.0
 POSITIVE_CONTRIB_ONLY = False
 
 
@@ -80,6 +82,8 @@ class SessionResult:
     group: str
     full_ll_gain_by_neuron: Dict[int, float]
     contrib_rllr_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    full_llhi_by_neuron: Dict[int, float]
+    contrib_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
 
 
 def compute_session_rllr(
@@ -195,27 +199,57 @@ def compute_session_rllr(
 
     full_csv = stats_root / "full_rllr_pyr.csv"
     contrib_csv = stats_root / "dropone_rllr_pyr.csv"
+    full_llhi_csv = stats_root / "full_llhi_pyr.csv"
+    contrib_llhi_csv = stats_root / "dropone_llhi_pyr.csv"
 
+    full_map: Dict[int, float] = {}
+    contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    full_llhi_map: Dict[int, float] = {}
+    contrib_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+
+    has_rllr = False
     if full_csv.exists() and contrib_csv.exists():
         df_full = pd.read_csv(full_csv)
         df_con = pd.read_csv(contrib_csv)
         has_rllr = ("ll_gain" in df_full.columns) and ("rllr" in df_con.columns)
         if has_rllr:
             full_map = {int(r["neuron_idx"]): float(r["ll_gain"]) for _, r in df_full.iterrows()}
-            contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
             for _, r in df_con.iterrows():
                 contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["rllr"])
-            return SessionResult(
-                session=session,
-                group=group,
-                full_ll_gain_by_neuron=full_map,
-                contrib_rllr_by_feature_by_neuron=contrib,
-            )
 
-    full_ll_gain_by_neuron: Dict[int, float] = {}
+    has_llhi = False
+    if full_llhi_csv.exists() and contrib_llhi_csv.exists():
+        df_full_llhi = pd.read_csv(full_llhi_csv)
+        df_con_llhi = pd.read_csv(contrib_llhi_csv)
+        has_llhi = ("llhi_full" in df_full_llhi.columns) and ("delta_llhi" in df_con_llhi.columns)
+        if has_llhi:
+            full_llhi_map = {int(r["neuron_idx"]): float(r["llhi_full"]) for _, r in df_full_llhi.iterrows()}
+            for _, r in df_con_llhi.iterrows():
+                contrib_llhi[str(r["feature"])][int(r["neuron_idx"])] = float(r["delta_llhi"])
+
+    if has_rllr and has_llhi:
+        return SessionResult(
+            session=session,
+            group=group,
+            full_ll_gain_by_neuron=full_map,
+            contrib_rllr_by_feature_by_neuron=contrib,
+            full_llhi_by_neuron=full_llhi_map,
+            contrib_delta_llhi_by_feature_by_neuron=contrib_llhi,
+        )
+
+    need_rllr = not has_rllr
+    need_llhi = not has_llhi
+
+    full_ll_gain_by_neuron: Dict[int, float] = full_map.copy()
     ll_full_by_neuron: Dict[int, float] = {}
     ll0_by_neuron: Dict[int, float] = {}
-    contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    full_llhi_by_neuron: Dict[int, float] = full_llhi_map.copy()
+    contrib_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    contrib_delta_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    if has_rllr:
+        contrib_rllr = contrib
+    if has_llhi:
+        contrib_delta_llhi = contrib_llhi
 
     missing_full_model_dir = 0
     missing_full_weights = 0
@@ -231,9 +265,10 @@ def compute_session_rllr(
 
     for ni, full_vars in pyr_models.items():
         y = Y_all[:, ni].astype(np.float64)
-        mu0_oof = build_oof_intercept_mu(y, folds_idx)
-        ll0 = poisson_loglik(y, mu0_oof)
-        ll0_by_neuron[ni] = float(ll0)
+        if need_rllr:
+            mu0_oof = build_oof_intercept_mu(y, folds_idx)
+            ll0 = poisson_loglik(y, mu0_oof)
+            ll0_by_neuron[ni] = float(ll0)
 
         X_full, feats_full, mk_full = get_X(full_vars)
         model_dir_full = find_saved_model_dir(mk_full)
@@ -251,12 +286,16 @@ def compute_session_rllr(
             print(f"[SKIP] {session}: failed loading full model {mk_full} (neuron_{ni+1}): {exc}")
             failed_full_predict += 1
             continue
-        ll_full = poisson_loglik(y, mu_oof_full)
-        ll_full_by_neuron[ni] = float(ll_full)
+        ll_full = None
+        if need_rllr:
+            ll_full = poisson_loglik(y, mu_oof_full)
+            ll_full_by_neuron[ni] = float(ll_full)
+            ll_gain = float(ll_full - ll0_by_neuron[ni])
+            full_ll_gain_by_neuron[ni] = ll_gain
+        if need_llhi:
+            llhi_full = compute_llhi_bps_poisson(y, mu_oof_full)
+            full_llhi_by_neuron[ni] = float(llhi_full)
         full_processed += 1
-
-        ll_gain = float(ll_full - ll0)
-        full_ll_gain_by_neuron[ni] = ll_gain
 
         mu_oof_red_by_feat: Dict[str, np.ndarray] = {}
         for v in full_vars:
@@ -282,74 +321,136 @@ def compute_session_rllr(
                 missing_drop_weights += 1
                 continue
             try:
-                mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
-                mu_oof_red_by_feat[v] = mu_red
+                if need_rllr or need_llhi:
+                    mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
+                    mu_oof_red_by_feat[v] = mu_red
             except Exception as exc:
                 print(f"[WARN] {session}: failed loading drop model {mk_red} (neuron_{ni+1}): {exc}")
                 failed_drop_predict += 1
             total_drop_models += 1
 
-        denom = ll_full - ll0
         for v in full_vars:
-            if denom <= 0 or not np.isfinite(denom):
-                contrib[v][ni] = float("nan")
-                continue
             if v not in mu_oof_red_by_feat:
-                contrib[v][ni] = float("nan")
+                if need_rllr:
+                    contrib_rllr[v][ni] = float("nan")
+                if need_llhi:
+                    contrib_delta_llhi[v][ni] = float("nan")
                 continue
-            ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
-            contrib[v][ni] = float((ll_full - ll_red) / denom)
 
-    df_full_rows = [
-        {
-            "session": session,
-            "group": group,
-            "neuron_idx": ni,
-            "ll_full": ll_full_by_neuron[ni],
-            "ll0": ll0_by_neuron[ni],
-            "ll_gain": full_ll_gain_by_neuron[ni],
-        }
-        for ni in sorted(full_ll_gain_by_neuron.keys())
-    ]
-    if not df_full_rows:
-        print(f"[WARN] {session}: no full-model rows produced; check weights and inputs")
-    df_full = pd.DataFrame(
-        df_full_rows,
-        columns=[
-            "session",
-            "group",
-            "neuron_idx",
-            "ll_full",
-            "ll0",
-            "ll_gain",
-        ],
-    )
-    df_full.to_csv(full_csv, index=False)
+            if need_rllr:
+                denom = full_ll_gain_by_neuron.get(ni, float("nan"))
+                if denom <= 0 or not np.isfinite(denom) or ll_full is None:
+                    contrib_rllr[v][ni] = float("nan")
+                else:
+                    ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
+                    contrib_rllr[v][ni] = float((ll_full - ll_red) / denom)
 
-    rows = []
-    for v in VARS_ALL:
-        for ni, frac in contrib[v].items():
-            rows.append(
-                {
-                    "session": session,
-                    "group": group,
-                    "feature": v,
-                    "neuron_idx": ni,
-                    "rllr": frac,
-                }
-            )
-    if not rows:
-        print(f"[WARN] {session}: no drop-one rows produced; check reduced models and weights")
-    pd.DataFrame(
-        rows,
-        columns=[
-            "session",
-            "group",
-            "feature",
-            "neuron_idx",
-            "rllr",
-        ],
-    ).to_csv(contrib_csv, index=False)
+            if need_llhi:
+                llhi_full = full_llhi_by_neuron.get(ni, float("nan"))
+                llhi_red = compute_llhi_bps_poisson(y, mu_oof_red_by_feat[v])
+                if not np.isfinite(llhi_full) or not np.isfinite(llhi_red):
+                    contrib_delta_llhi[v][ni] = float("nan")
+                else:
+                    contrib_delta_llhi[v][ni] = float(llhi_full - llhi_red)
+
+    if need_rllr:
+        df_full_rows = [
+            {
+                "session": session,
+                "group": group,
+                "neuron_idx": ni,
+                "ll_full": ll_full_by_neuron[ni],
+                "ll0": ll0_by_neuron[ni],
+                "ll_gain": full_ll_gain_by_neuron[ni],
+            }
+            for ni in sorted(full_ll_gain_by_neuron.keys())
+        ]
+        if not df_full_rows:
+            print(f"[WARN] {session}: no full-model rows produced; check weights and inputs")
+        df_full = pd.DataFrame(
+            df_full_rows,
+            columns=[
+                "session",
+                "group",
+                "neuron_idx",
+                "ll_full",
+                "ll0",
+                "ll_gain",
+            ],
+        )
+        df_full.to_csv(full_csv, index=False)
+
+        rows = []
+        for v in VARS_ALL:
+            for ni, frac in contrib_rllr[v].items():
+                rows.append(
+                    {
+                        "session": session,
+                        "group": group,
+                        "feature": v,
+                        "neuron_idx": ni,
+                        "rllr": frac,
+                    }
+                )
+        if not rows:
+            print(f"[WARN] {session}: no drop-one rows produced; check reduced models and weights")
+        pd.DataFrame(
+            rows,
+            columns=[
+                "session",
+                "group",
+                "feature",
+                "neuron_idx",
+                "rllr",
+            ],
+        ).to_csv(contrib_csv, index=False)
+
+    if need_llhi:
+        df_full_llhi_rows = [
+            {
+                "session": session,
+                "group": group,
+                "neuron_idx": ni,
+                "llhi_full": full_llhi_by_neuron[ni],
+            }
+            for ni in sorted(full_llhi_by_neuron.keys())
+        ]
+        if not df_full_llhi_rows:
+            print(f"[WARN] {session}: no full LLHI rows produced; check weights and inputs")
+        pd.DataFrame(
+            df_full_llhi_rows,
+            columns=[
+                "session",
+                "group",
+                "neuron_idx",
+                "llhi_full",
+            ],
+        ).to_csv(full_llhi_csv, index=False)
+
+        llhi_rows = []
+        for v in VARS_ALL:
+            for ni, delta in contrib_delta_llhi[v].items():
+                llhi_rows.append(
+                    {
+                        "session": session,
+                        "group": group,
+                        "feature": v,
+                        "neuron_idx": ni,
+                        "delta_llhi": delta,
+                    }
+                )
+        if not llhi_rows:
+            print(f"[WARN] {session}: no drop-one LLHI rows produced; check reduced models and weights")
+        pd.DataFrame(
+            llhi_rows,
+            columns=[
+                "session",
+                "group",
+                "feature",
+                "neuron_idx",
+                "delta_llhi",
+            ],
+        ).to_csv(contrib_llhi_csv, index=False)
 
     print(
         f"[INFO] {session}: full processed={full_processed}, "
@@ -368,7 +469,9 @@ def compute_session_rllr(
         session=session,
         group=group,
         full_ll_gain_by_neuron=full_ll_gain_by_neuron,
-        contrib_rllr_by_feature_by_neuron=contrib,
+        contrib_rllr_by_feature_by_neuron=contrib_rllr,
+        full_llhi_by_neuron=full_llhi_by_neuron,
+        contrib_delta_llhi_by_feature_by_neuron=contrib_delta_llhi,
     )
 
 
@@ -408,18 +511,24 @@ def main():
                 feat: {ni: val for ni, val in contrib.items() if np.isfinite(val) and val > 0}
                 for feat, contrib in r.contrib_rllr_by_feature_by_neuron.items()
             }
+            filtered_llhi = {
+                feat: {ni: val for ni, val in contrib.items() if np.isfinite(val) and val > 0}
+                for feat, contrib in r.contrib_delta_llhi_by_feature_by_neuron.items()
+            }
             filtered_results.append(
                 SessionResult(
                     session=r.session,
                     group=r.group,
                     full_ll_gain_by_neuron=r.full_ll_gain_by_neuron,
                     contrib_rllr_by_feature_by_neuron=filtered,
+                    full_llhi_by_neuron=r.full_llhi_by_neuron,
+                    contrib_delta_llhi_by_feature_by_neuron=filtered_llhi,
                 )
             )
     else:
         filtered_results = results
 
-    plot_stats = [
+    rllr_stats = [
         DroponeSessionStats(
             session=r.session,
             group=r.group,
@@ -429,32 +538,86 @@ def main():
             shuf_std_by_feature={v: {} for v in VARS_ALL},
         )
         for r in filtered_results
+        if r.full_ll_gain_by_neuron and any(r.contrib_rllr_by_feature_by_neuron.values())
     ]
-    dropone_plot_data = collect_dropone_plot_data(
-        plot_stats,
-        features=VARS_ALL,
-        min_full_ll_gain=MIN_FULL_LL_GAIN,
-        compute_delta=False,
-    )
-    summary_csv = plot_dropone_suite(
-        WEIGHTS_BASE / "RLLR_SUMMARY",
-        features=VARS_ALL,
-        plot_data=dropone_plot_data,
-        min_full_ll_gain=MIN_FULL_LL_GAIN,
-        seed=SEED,
-        max_scatter_points=0,
-        ylim_pad_frac=0.08,
-        use_zscore=False,
-    )
-    print(
-        f"[OK] Drop-one boxplots (full LL gain ≥ {MIN_FULL_LL_GAIN:g}): "
-        f"indoor {dropone_plot_data.kept_counts['indoor']}/{dropone_plot_data.total_counts['indoor']}, "
-        f"outdoor {dropone_plot_data.kept_counts['outdoor']}/{dropone_plot_data.total_counts['outdoor']}",
-    )
-    print(f"[OK] Summary CSV: {summary_csv}")
+    if rllr_stats:
+        dropone_plot_data = collect_dropone_plot_data(
+            rllr_stats,
+            features=VARS_ALL,
+            min_full_ll_gain=MIN_FULL_LL_GAIN,
+            compute_delta=True,
+        )
+        summary_csv = plot_dropone_suite(
+            WEIGHTS_BASE / "RLLR_SUMMARY",
+            features=VARS_ALL,
+            plot_data=dropone_plot_data,
+            min_full_ll_gain=MIN_FULL_LL_GAIN,
+            seed=SEED,
+            max_scatter_points=0,
+            ylim_pad_frac=0.08,
+            use_zscore=False,
+            metric_tag="rllr",
+            ylabel="rLLR",
+            title_metric="drop-one contribution",
+            summary_metric="dropone_rllr",
+            include_delta_plot=True,
+            use_shuffle_line=False,
+        )
+        print(
+            f"[OK] Drop-one boxplots (full LL gain ≥ {MIN_FULL_LL_GAIN:g}): "
+            f"indoor {dropone_plot_data.kept_counts['indoor']}/{dropone_plot_data.total_counts['indoor']}, "
+            f"outdoor {dropone_plot_data.kept_counts['outdoor']}/{dropone_plot_data.total_counts['outdoor']}",
+        )
+        print(f"[OK] Summary CSV: {summary_csv}")
+    else:
+        print("[WARN] No rLLR stats available for plotting.")
+
+    llhi_stats = [
+        DroponeSessionStats(
+            session=r.session,
+            group=r.group,
+            full_ll_gain=r.full_llhi_by_neuron,
+            frac_by_feature=r.contrib_delta_llhi_by_feature_by_neuron,
+            shuf_mean_by_feature={v: {} for v in VARS_ALL},
+            shuf_std_by_feature={v: {} for v in VARS_ALL},
+        )
+        for r in filtered_results
+        if r.full_llhi_by_neuron and any(r.contrib_delta_llhi_by_feature_by_neuron.values())
+    ]
+    if llhi_stats:
+        dropone_llhi_data = collect_dropone_plot_data(
+            llhi_stats,
+            features=VARS_ALL,
+            min_full_ll_gain=MIN_FULL_LLHI,
+            compute_delta=False,
+        )
+        llhi_summary_csv = plot_dropone_suite(
+            WEIGHTS_BASE / "LLHI_SUMMARY",
+            features=VARS_ALL,
+            plot_data=dropone_llhi_data,
+            min_full_ll_gain=MIN_FULL_LLHI,
+            seed=SEED,
+            max_scatter_points=0,
+            ylim_pad_frac=0.08,
+            use_zscore=False,
+            metric_tag="llhi",
+            ylabel="ΔLLHI (bits/spike)",
+            title_metric="drop-one absolute contribution",
+            summary_metric="dropone_delta_llhi",
+            include_delta_plot=False,
+            use_shuffle_line=False,
+        )
+        print(
+            f"[OK] Drop-one LLHI boxplots (full LLHI ≥ {MIN_FULL_LLHI:g}): "
+            f"indoor {dropone_llhi_data.kept_counts['indoor']}/{dropone_llhi_data.total_counts['indoor']}, "
+            f"outdoor {dropone_llhi_data.kept_counts['outdoor']}/{dropone_llhi_data.total_counts['outdoor']}",
+        )
+        print(f"[OK] LLHI Summary CSV: {llhi_summary_csv}")
+    else:
+        print("[WARN] No ΔLLHI stats available for plotting.")
 
     for group in ["indoor", "outdoor"]:
-        group_res = [r for r in filtered_results if r.group == group]
+        group_res = [r for r in filtered_results if r.group == group and r.full_ll_gain_by_neuron]
         if not group_res:
             print(f"[WARN] No sessions for group={group}")
             continue
@@ -480,6 +643,8 @@ def main():
             title=f"Poisson GLM | Pyramidal only | {group} | mean ± {CI_LO}-{CI_HI}th (hier bootstrap)",
             full_stat=full_stat,
             feature_stats=feature_stats,
+            full_ylabel="LL gain (full - intercept)",
+            feature_ylabel="rLLR",
         )
         print(f"[OK] Saved: {out_png}")
 
@@ -497,6 +662,53 @@ def main():
             m, lo, hi = feature_stats[feat]
             rows.append({"group": group, "metric": "rllr", "feature": feat, "mean": m, "ci_lo": lo, "ci_hi": hi})
         pd.DataFrame(rows).to_csv(WEIGHTS_BASE / f"RLLR_DROPONE_PYR_{group}_summary.csv", index=False)
+
+    for group in ["indoor", "outdoor"]:
+        group_res = [r for r in filtered_results if r.group == group and r.full_llhi_by_neuron]
+        if not group_res:
+            print(f"[WARN] No sessions with LLHI stats for group={group}")
+            continue
+
+        sess_full: Dict[str, np.ndarray] = {}
+        for r in group_res:
+            arr = np.array(list(r.full_llhi_by_neuron.values()), dtype=np.float64)
+            sess_full[r.session] = arr
+
+        full_stat = hierarchical_bootstrap_mean(sess_full, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
+
+        feature_stats = {}
+        for feat in VARS_ALL:
+            sess_feat = {}
+            for r in group_res:
+                arr = np.array(list(r.contrib_delta_llhi_by_feature_by_neuron[feat].values()), dtype=np.float64)
+                sess_feat[r.session] = arr
+            feature_stats[feat] = hierarchical_bootstrap_mean(sess_feat, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
+
+        out_png = WEIGHTS_BASE / f"LLHI_DROPONE_PYR_{group}.png"
+        plot_summary_figure(
+            out_png=out_png,
+            title=f"Poisson GLM | Pyramidal only | {group} | mean ± {CI_LO}-{CI_HI}th (hier bootstrap)",
+            full_stat=full_stat,
+            feature_stats=feature_stats,
+            full_ylabel="LLHI (full - mean-rate)",
+            feature_ylabel="ΔLLHI (bits/spike)",
+        )
+        print(f"[OK] Saved: {out_png}")
+
+        rows = [
+            {
+                "group": group,
+                "metric": "full_llhi",
+                "feature": "FULL",
+                "mean": full_stat[0],
+                "ci_lo": full_stat[1],
+                "ci_hi": full_stat[2],
+            }
+        ]
+        for feat in VARS_ALL:
+            m, lo, hi = feature_stats[feat]
+            rows.append({"group": group, "metric": "delta_llhi", "feature": feat, "mean": m, "ci_lo": lo, "ci_hi": hi})
+        pd.DataFrame(rows).to_csv(WEIGHTS_BASE / f"LLHI_DROPONE_PYR_{group}_summary.csv", index=False)
 
     print("[DONE]")
 

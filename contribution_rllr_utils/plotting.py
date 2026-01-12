@@ -520,23 +520,27 @@ def plot_dropone_suite(
     max_scatter_points: int,
     ylim_pad_frac: float,
     use_zscore: bool = False,
+    metric_tag: str = "rllr",
+    ylabel: str = "rLLR",
+    title_metric: str = "drop-one contribution",
+    summary_metric: str = "dropone_rllr",
+    include_delta_plot: bool = True,
+    use_shuffle_line: bool = True,
 ) -> Path:
     suffix = suffix_for_threshold(min_full_ll_gain)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ylabel = "rLLR"
-    title_metric = "drop-one contribution"
     if use_zscore:
-        ylabel = "rLLR z-score"
-        title_metric = "drop-one contribution z-score"
+        ylabel = f"{ylabel} z-score"
+        title_metric = f"{title_metric} z-score"
 
     z95 = 1.644854
-    if use_zscore:
+    if use_zscore and use_shuffle_line:
         shuffle95_combined = z95
         shuffle95_indoor = z95
         shuffle95_outdoor = z95
-    else:
+    elif use_shuffle_line:
         combined_vals = []
         indoor_vals = []
         outdoor_vals = []
@@ -553,9 +557,13 @@ def plot_dropone_suite(
         shuffle95_combined = float(np.nanmedian(combined)) if combined.size else None
         shuffle95_indoor = float(np.nanmedian(indoor)) if indoor.size else None
         shuffle95_outdoor = float(np.nanmedian(outdoor)) if outdoor.size else None
+    else:
+        shuffle95_combined = None
+        shuffle95_indoor = None
+        shuffle95_outdoor = None
 
     plot_combined_indoor_outdoor(
-        out_dir / f"BOX_dropone_rllr_indoor_vs_outdoor{suffix}.png",
+        out_dir / f"BOX_dropone_{metric_tag}_indoor_vs_outdoor{suffix}.png",
         title=f"{title_metric} (pyramidal; full LL gain ≥ {min_full_ll_gain:g}) | whiskers/caps + jitter",
         ylabel=ylabel,
         features=features,
@@ -574,7 +582,7 @@ def plot_dropone_suite(
     features_outdoor_sorted = sorted(features, key=lambda f: outdoor_means.get(f, float("-inf")), reverse=True)
 
     plot_single_group_sorted(
-        out_dir / f"BOX_dropone_rllr_indoor_only_sorted{suffix}.png",
+        out_dir / f"BOX_dropone_{metric_tag}_indoor_only_sorted{suffix}.png",
         title=f"Indoor only (sorted by mean) | {title_metric} | full LL gain ≥ {min_full_ll_gain:g}",
         ylabel=ylabel,
         group_label="indoor",
@@ -587,7 +595,7 @@ def plot_dropone_suite(
     )
 
     plot_single_group_sorted(
-        out_dir / f"BOX_dropone_rllr_outdoor_only_sorted{suffix}.png",
+        out_dir / f"BOX_dropone_{metric_tag}_outdoor_only_sorted{suffix}.png",
         title=f"Outdoor only (sorted by mean) | {title_metric} | full LL gain ≥ {min_full_ll_gain:g}",
         ylabel=ylabel,
         group_label="outdoor",
@@ -612,7 +620,7 @@ def plot_dropone_suite(
             ylim_pad_frac=ylim_pad_frac,
         )
 
-        if not use_zscore:
+        if include_delta_plot and not use_zscore:
             plot_combined_indoor_outdoor(
                 out_dir / f"BOX_dropone_delta_ll_indoor_vs_outdoor{suffix}.png",
                 title=f"Drop-one ΔLL (= rLLR×LL gain) (pyramidal; ≥ {min_full_ll_gain:g}) | whiskers/caps + jitter",
@@ -625,7 +633,7 @@ def plot_dropone_suite(
                 ylim_pad_frac=ylim_pad_frac,
             )
 
-    out_csv = out_dir / f"boxplot_dropone_rllr_summary{suffix}.csv"
+    out_csv = out_dir / f"boxplot_dropone_{metric_tag}_summary{suffix}.csv"
     with open(out_csv, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(
             f,
@@ -639,7 +647,7 @@ def plot_dropone_suite(
                 if arr.size == 0:
                     continue
                 w.writerow({
-                    "metric": "dropone_z" if use_zscore else "dropone_rllr",
+                    "metric": "dropone_z" if use_zscore else summary_metric,
                     "group": grp,
                     "feature": feat,
                     "n": int(arr.size),
@@ -677,6 +685,9 @@ def plot_summary_figure(
     title: str,
     full_stat: Tuple[float, float, float],
     feature_stats: Dict[str, Tuple[float, float, float]],
+    *,
+    full_ylabel: str = "LL gain (full - intercept)",
+    feature_ylabel: str = "rLLR",
 ):
     out_png.parent.mkdir(parents=True, exist_ok=True)
 
@@ -698,13 +709,13 @@ def plot_summary_figure(
     ax0.errorbar([0], [m], yerr=[[m - lo], [hi - m]], fmt="none", capsize=4, linewidth=1.2)
     ax0.set_xticks([0])
     ax0.set_xticklabels(["Full\nmodel"])
-    ax0.set_ylabel("LL gain (full - intercept)")
+    ax0.set_ylabel(full_ylabel)
 
     ax1 = fig.add_subplot(gs[0, 1])
     ax1.bar(np.arange(len(features)), means, yerr=yerr, capsize=4, linewidth=1.2, edgecolor="black")
     ax1.set_xticks(np.arange(len(features)))
     ax1.set_xticklabels(features, rotation=0)
-    ax1.set_ylabel("rLLR")
+    ax1.set_ylabel(feature_ylabel)
 
     fig.suptitle(title)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
