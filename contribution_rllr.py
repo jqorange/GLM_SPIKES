@@ -3,8 +3,9 @@
 """
 Compute Poisson-GLM drop-one contributions using rLLR normalization with forward-selected
 (full) models. Full model is the forward-search-selected subset per neuron; drop-one
-models remove a single covariate from that subset. Contributions are optionally z-scored
-against a label-shuffle baseline. This pipeline reuses saved 10-fold weights from
+models remove a single covariate from that subset. Contributions are computed as the
+relative log-likelihood ratio (rLLR) without label-shuffle z-scoring. This pipeline
+reuses saved 10-fold weights from
 GLM_Poisson_forward. Drop-one models are (re)fit per neuron and cached under a
 drop_one/ folder for reuse.
 """
@@ -70,7 +71,6 @@ from glm_poisson_forward.io_utils import (
 )
 
 MIN_FULL_LL_GAIN = 0.0
-N_SHUFFLE = 100
 POSITIVE_CONTRIB_ONLY = False
 
 
@@ -199,12 +199,12 @@ def compute_session_rllr(
     if full_csv.exists() and contrib_csv.exists():
         df_full = pd.read_csv(full_csv)
         df_con = pd.read_csv(contrib_csv)
-        has_shuffle = ("ll_gain_shuf_mean" in df_full.columns) and ("rllr_z" in df_con.columns)
-        if has_shuffle:
+        has_rllr = ("ll_gain" in df_full.columns) and ("rllr" in df_con.columns)
+        if has_rllr:
             full_map = {int(r["neuron_idx"]): float(r["ll_gain"]) for _, r in df_full.iterrows()}
             contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
             for _, r in df_con.iterrows():
-                contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["rllr_z"])
+                contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["rllr"])
             return SessionResult(
                 session=session,
                 group=group,
@@ -215,12 +215,7 @@ def compute_session_rllr(
     full_ll_gain_by_neuron: Dict[int, float] = {}
     ll_full_by_neuron: Dict[int, float] = {}
     ll0_by_neuron: Dict[int, float] = {}
-    full_shuffle_stats: Dict[int, Tuple[float, float, float]] = {}
-
     contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-    contrib_shuffle_stats: Dict[str, Dict[int, Tuple[float, float, float]]] = {v: {} for v in VARS_ALL}
-
-    rng = np.random.default_rng(SEED)
 
     missing_full_model_dir = 0
     missing_full_weights = 0
@@ -305,39 +300,6 @@ def compute_session_rllr(
             ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
             contrib[v][ni] = float((ll_full - ll_red) / denom)
 
-        shuf_full = np.full(N_SHUFFLE, np.nan, dtype=np.float64)
-        shuf_frac: Dict[str, np.ndarray] = {v: np.full(N_SHUFFLE, np.nan, dtype=np.float64) for v in VARS_ALL}
-
-        for s in range(N_SHUFFLE):
-            y_shuf = rng.permutation(y)
-            ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
-            ll0_shuf = poisson_loglik(y_shuf, mu0_oof)
-            shuf_full[s] = ll_full_shuf - ll0_shuf
-
-            denom_shuf = ll_full_shuf - ll0_shuf
-            for v in full_vars:
-                if not np.isfinite(denom_shuf) or denom_shuf <= 0:
-                    shuf_frac[v][s] = float("nan")
-                    continue
-                if v not in mu_oof_red_by_feat:
-                    shuf_frac[v][s] = float("nan")
-                    continue
-                ll_red_shuf = poisson_loglik(y_shuf, mu_oof_red_by_feat[v])
-                shuf_frac[v][s] = float((ll_full_shuf - ll_red_shuf) / denom_shuf)
-
-        full_mu = float(np.nanmean(shuf_full))
-        full_std = float(np.nanstd(shuf_full, ddof=1))
-        full_z = float("nan") if (not np.isfinite(full_std) or full_std <= 0) else float((ll_gain - full_mu) / full_std)
-        full_shuffle_stats[ni] = (full_mu, full_std, full_z)
-
-        for v in full_vars:
-            arr = shuf_frac[v]
-            mu = float(np.nanmean(arr))
-            std = float(np.nanstd(arr, ddof=1))
-            real = contrib[v][ni]
-            z = float("nan") if (not np.isfinite(std) or std <= 0 or not np.isfinite(real)) else float((real - mu) / std)
-            contrib_shuffle_stats[v][ni] = (mu, std, z)
-
     df_full_rows = [
         {
             "session": session,
@@ -346,9 +308,6 @@ def compute_session_rllr(
             "ll_full": ll_full_by_neuron[ni],
             "ll0": ll0_by_neuron[ni],
             "ll_gain": full_ll_gain_by_neuron[ni],
-            "ll_gain_shuf_mean": full_shuffle_stats[ni][0],
-            "ll_gain_shuf_std": full_shuffle_stats[ni][1],
-            "ll_gain_z": full_shuffle_stats[ni][2],
         }
         for ni in sorted(full_ll_gain_by_neuron.keys())
     ]
@@ -363,9 +322,6 @@ def compute_session_rllr(
             "ll_full",
             "ll0",
             "ll_gain",
-            "ll_gain_shuf_mean",
-            "ll_gain_shuf_std",
-            "ll_gain_z",
         ],
     )
     df_full.to_csv(full_csv, index=False)
@@ -373,7 +329,6 @@ def compute_session_rllr(
     rows = []
     for v in VARS_ALL:
         for ni, frac in contrib[v].items():
-            mu, std, z = contrib_shuffle_stats[v].get(ni, (float("nan"), float("nan"), float("nan")))
             rows.append(
                 {
                     "session": session,
@@ -381,9 +336,6 @@ def compute_session_rllr(
                     "feature": v,
                     "neuron_idx": ni,
                     "rllr": frac,
-                    "rllr_shuf_mean": mu,
-                    "rllr_shuf_std": std,
-                    "rllr_z": z,
                 }
             )
     if not rows:
@@ -396,9 +348,6 @@ def compute_session_rllr(
             "feature",
             "neuron_idx",
             "rllr",
-            "rllr_shuf_mean",
-            "rllr_shuf_std",
-            "rllr_z",
         ],
     ).to_csv(contrib_csv, index=False)
 
@@ -415,16 +364,11 @@ def compute_session_rllr(
         f"failed drop predict={failed_drop_predict}"
     )
 
-    contrib_z: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-    for v in VARS_ALL:
-        for ni in contrib[v]:
-            contrib_z[v][ni] = contrib_shuffle_stats[v].get(ni, (float("nan"), float("nan"), float("nan")))[2]
-
     return SessionResult(
         session=session,
         group=group,
         full_ll_gain_by_neuron=full_ll_gain_by_neuron,
-        contrib_rllr_by_feature_by_neuron=contrib_z,
+        contrib_rllr_by_feature_by_neuron=contrib,
     )
 
 
@@ -500,7 +444,7 @@ def main():
         seed=SEED,
         max_scatter_points=0,
         ylim_pad_frac=0.08,
-        use_zscore=True,
+        use_zscore=False,
     )
     print(
         f"[OK] Drop-one boxplots (full LL gain ≥ {MIN_FULL_LL_GAIN:g}): "
