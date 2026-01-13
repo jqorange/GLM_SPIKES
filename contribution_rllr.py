@@ -616,6 +616,61 @@ def main():
     else:
         print("[WARN] No ΔLLHI stats available for plotting.")
 
+    rllhi_stats = []
+    for r in filtered_results:
+        if not r.full_llhi_by_neuron or not any(r.contrib_delta_llhi_by_feature_by_neuron.values()):
+            continue
+        rllhi_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+        for feat in VARS_ALL:
+            for ni, delta_val in r.contrib_delta_llhi_by_feature_by_neuron.get(feat, {}).items():
+                full_val = r.full_llhi_by_neuron.get(ni, np.nan)
+                if not np.isfinite(full_val) or not np.isfinite(delta_val) or full_val == 0:
+                    continue
+                rllhi_by_feature[feat][ni] = float(delta_val) / float(full_val)
+        if any(rllhi_by_feature.values()):
+            rllhi_stats.append(
+                DroponeSessionStats(
+                    session=r.session,
+                    group=r.group,
+                    full_ll_gain=r.full_llhi_by_neuron,
+                    frac_by_feature=rllhi_by_feature,
+                    shuf_mean_by_feature={v: {} for v in VARS_ALL},
+                    shuf_std_by_feature={v: {} for v in VARS_ALL},
+                )
+            )
+
+    if rllhi_stats:
+        dropone_rllhi_data = collect_dropone_plot_data(
+            rllhi_stats,
+            features=VARS_ALL,
+            min_full_ll_gain=MIN_FULL_LLHI,
+            compute_delta=False,
+        )
+        rllhi_summary_csv = plot_dropone_suite(
+            WEIGHTS_BASE / "RLLHI_SUMMARY",
+            features=VARS_ALL,
+            plot_data=dropone_rllhi_data,
+            min_full_ll_gain=MIN_FULL_LLHI,
+            seed=SEED,
+            max_scatter_points=0,
+            ylim_pad_frac=0.08,
+            use_zscore=False,
+            metric_tag="rllhi",
+            ylabel="rLLHI (ΔLLHI / LLHI_full)",
+            title_metric="drop-one relative contribution",
+            summary_metric="dropone_rllhi",
+            include_delta_plot=False,
+            use_shuffle_line=False,
+        )
+        print(
+            f"[OK] Drop-one rLLHI boxplots (full LLHI ≥ {MIN_FULL_LLHI:g}): "
+            f"indoor {dropone_rllhi_data.kept_counts['indoor']}/{dropone_rllhi_data.total_counts['indoor']}, "
+            f"outdoor {dropone_rllhi_data.kept_counts['outdoor']}/{dropone_rllhi_data.total_counts['outdoor']}",
+        )
+        print(f"[OK] rLLHI Summary CSV: {rllhi_summary_csv}")
+    else:
+        print("[WARN] No rLLHI stats available for plotting.")
+
     for group in ["indoor", "outdoor"]:
         group_res = [r for r in filtered_results if r.group == group and r.full_ll_gain_by_neuron]
         if not group_res:
