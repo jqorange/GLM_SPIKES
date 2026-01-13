@@ -10,6 +10,7 @@ Drop-one contribution plotting (pyramidal-only) with:
     final model includes that feature (still pyramidal only).
   - Filter: only neurons with full DevExpl >= --min_full_devexpl enter downstream analysis
   - Use --metric rllr to plot contribution_rllr outputs (uses RLLR_STATS + full LL gain filter).
+  - Use --metric llhi or rllhi to plot contribution_rllr LLHI outputs (full_llhi_pyr.csv/dropone_llhi_pyr.csv).
   - By default, uses shuffle-normalized z-scores when available (use --use_raw for fractions)
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
@@ -22,6 +23,10 @@ Inputs per session:
       <WEIGHTS_BASE>/<session>/RLLR_STATS/
           full_rllr_pyr.csv
           dropone_rllr_pyr.csv  columns include: feature, neuron_idx, rllr
+  - metric=llhi or rllhi:
+      <WEIGHTS_BASE>/<session>/RLLR_STATS/
+          full_llhi_pyr.csv
+          dropone_llhi_pyr.csv  columns include: feature, neuron_idx, delta_llhi
 
 Outputs:
   - metric=devexpl:
@@ -38,6 +43,20 @@ Outputs:
           BOX_dropone_rllr_outdoor_only_sorted_*.png
           (Optional if full exists) BOX_full_ll_gain_*.png, BOX_dropone_delta_*.png
           boxplot_dropone_rllr_summary_*.csv
+  - metric=llhi:
+      <WEIGHTS_BASE>/LLHI_SUMMARY/
+          BOX_dropone_llhi_indoor_vs_outdoor_*.png
+          BOX_dropone_llhi_indoor_only_sorted_*.png
+          BOX_dropone_llhi_outdoor_only_sorted_*.png
+          (Optional if full exists) BOX_full_ll_gain_*.png
+          boxplot_dropone_delta_llhi_summary_*.csv
+  - metric=rllhi:
+      <WEIGHTS_BASE>/RLLHI_SUMMARY/
+          BOX_dropone_rllhi_indoor_vs_outdoor_*.png
+          BOX_dropone_rllhi_indoor_only_sorted_*.png
+          BOX_dropone_rllhi_outdoor_only_sorted_*.png
+          (Optional if full exists) BOX_full_ll_gain_*.png
+          boxplot_dropone_rllhi_summary_*.csv
 
 Run example:
   python plot_contribution.py ^
@@ -63,6 +82,8 @@ from contribution_utils import (
 )
 from contribution_rllr_utils import (
     collect_dropone_plot_data as collect_dropone_plot_data_rllr,
+    load_dropone_llhi_session_stats as load_dropone_llhi_session_stats_rllr,
+    load_dropone_rllhi_session_stats as load_dropone_rllhi_session_stats_rllr,
     load_forward_selected_neurons as load_forward_selected_neurons_rllr,
     load_dropone_session_stats as load_dropone_session_stats_rllr,
     plot_dropone_suite as plot_dropone_suite_rllr,
@@ -83,13 +104,18 @@ def main():
         "--metric",
         type=str,
         default="devexpl",
-        choices=["devexpl", "rllr"],
-        help="Which contribution metric to plot: devexpl (DROPONE_STATS) or rllr (RLLR_STATS).",
+        choices=["devexpl", "rllr", "llhi", "rllhi"],
+        help=(
+            "Which contribution metric to plot: devexpl (DROPONE_STATS), rllr (RLLR_STATS), "
+            "llhi (dropone ΔLLHI), or rllhi (ΔLLHI / LLHI_full)."
+        ),
     )
     ap.add_argument("--min_full_devexpl", type=float, default=0.1,
                     help="Only neurons with full DevExpl >= this threshold enter downstream analyses.")
     ap.add_argument("--min_full_ll_gain", type=float, default=0.0,
                     help="Only neurons with full LL gain >= this threshold enter downstream analyses (metric=rllr).")
+    ap.add_argument("--min_full_llhi", type=float, default=0.0,
+                    help="Only neurons with full LLHI >= this threshold enter downstream analyses (metric=llhi/rllhi).")
     ap.add_argument("--features", type=str, default=",".join(DEFAULT_FEATURES),
                     help="Comma-separated feature names to plot; others are ignored.")
     ap.add_argument(
@@ -114,9 +140,18 @@ def main():
         raise SystemExit("[FATAL] --features parsed to empty list.")
 
     use_zscore = not args.use_raw
+    if args.metric in {"llhi", "rllhi"}:
+        use_zscore = False
 
     weights_base = Path(args.weights_base)
-    out_dir = weights_base / ("RLLR_SUMMARY" if args.metric == "rllr" else "DROPONE_SUMMARY")
+    if args.metric == "rllr":
+        out_dir = weights_base / "RLLR_SUMMARY"
+    elif args.metric == "llhi":
+        out_dir = weights_base / "LLHI_SUMMARY"
+    elif args.metric == "rllhi":
+        out_dir = weights_base / "RLLHI_SUMMARY"
+    else:
+        out_dir = weights_base / "DROPONE_SUMMARY"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sess_stats: List = []
@@ -129,7 +164,7 @@ def main():
     for sess_dir in sorted(session_dirs):
         whitelist = None
         if args.forward_modulated_only:
-            if args.metric == "rllr":
+            if args.metric in {"rllr", "llhi", "rllhi"}:
                 whitelist = load_forward_selected_neurons_rllr(sess_dir, features=features)
             else:
                 whitelist = load_forward_selected_neurons_devexpl(sess_dir, features=features)
@@ -139,6 +174,18 @@ def main():
                 features=features,
                 feature_neuron_whitelist=whitelist,
                 use_zscore=use_zscore,
+            )
+        elif args.metric == "llhi":
+            st = load_dropone_llhi_session_stats_rllr(
+                sess_dir,
+                features=features,
+                feature_neuron_whitelist=whitelist,
+            )
+        elif args.metric == "rllhi":
+            st = load_dropone_rllhi_session_stats_rllr(
+                sess_dir,
+                features=features,
+                feature_neuron_whitelist=whitelist,
             )
         else:
             st = load_dropone_session_stats_devexpl(
@@ -156,7 +203,7 @@ def main():
                 filtered_frac[feat] = kept
                 filtered_shuf_mean[feat] = {ni: val for ni, val in st.shuf_mean_by_feature.get(feat, {}).items() if ni in kept}
                 filtered_shuf_std[feat] = {ni: val for ni, val in st.shuf_std_by_feature.get(feat, {}).items() if ni in kept}
-            if args.metric == "rllr":
+            if args.metric in {"rllr", "llhi", "rllhi"}:
                 st = st.__class__(
                     session=st.session,
                     group=st.group,
@@ -204,6 +251,52 @@ def main():
             include_delta_plot=not use_zscore,
             use_shuffle_line=use_zscore,
         )
+    elif args.metric == "llhi":
+        plot_data = collect_dropone_plot_data_rllr(
+            sess_stats,
+            features=features,
+            min_full_ll_gain=args.min_full_llhi,
+            compute_delta=False,
+        )
+        summary_csv = plot_dropone_suite_rllr(
+            out_dir,
+            features=features,
+            plot_data=plot_data,
+            min_full_ll_gain=args.min_full_llhi,
+            seed=args.seed,
+            max_scatter_points=args.max_scatter_points,
+            ylim_pad_frac=args.ylim_pad_frac,
+            use_zscore=False,
+            metric_tag="llhi",
+            ylabel="ΔLLHI (bits/spike)",
+            title_metric="drop-one contribution",
+            summary_metric="dropone_delta_llhi",
+            include_delta_plot=False,
+            use_shuffle_line=False,
+        )
+    elif args.metric == "rllhi":
+        plot_data = collect_dropone_plot_data_rllr(
+            sess_stats,
+            features=features,
+            min_full_ll_gain=args.min_full_llhi,
+            compute_delta=False,
+        )
+        summary_csv = plot_dropone_suite_rllr(
+            out_dir,
+            features=features,
+            plot_data=plot_data,
+            min_full_ll_gain=args.min_full_llhi,
+            seed=args.seed,
+            max_scatter_points=args.max_scatter_points,
+            ylim_pad_frac=args.ylim_pad_frac,
+            use_zscore=False,
+            metric_tag="rllhi",
+            ylabel="rLLHI (ΔLLHI / LLHI_full)",
+            title_metric="drop-one contribution",
+            summary_metric="dropone_rllhi",
+            include_delta_plot=False,
+            use_shuffle_line=False,
+        )
     else:
         plot_data = collect_dropone_plot_data_devexpl(
             sess_stats,
@@ -226,9 +319,17 @@ def main():
     print(f"[OK] Features used: {features}")
     if args.metric == "rllr":
         print(f"[OK] Filter: full LL gain >= {args.min_full_ll_gain:g}")
+    elif args.metric in {"llhi", "rllhi"}:
+        print(f"[OK] Filter: full LLHI >= {args.min_full_llhi:g}")
     else:
         print(f"[OK] Filter: full DevExpl >= {args.min_full_devexpl:g}")
-    print(f"[OK] Contribution metric: {'z-score' if use_zscore else 'raw fraction'}")
+    if use_zscore:
+        metric_label = "z-score"
+    elif args.metric in {"llhi", "rllhi"}:
+        metric_label = "raw values"
+    else:
+        metric_label = "raw fraction"
+    print(f"[OK] Contribution metric: {metric_label}")
     print(
         f"[OK] Kept neurons: indoor {plot_data.kept_counts['indoor']}/{plot_data.total_counts['indoor']}, "
         f"outdoor {plot_data.kept_counts['outdoor']}/{plot_data.total_counts['outdoor']}",

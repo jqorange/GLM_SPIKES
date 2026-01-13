@@ -213,6 +213,116 @@ def load_dropone_session_stats(
     )
 
 
+def load_dropone_llhi_session_stats(
+    session_dir: Path,
+    features: Iterable[str],
+    *,
+    feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+) -> Optional[DroponeSessionStats]:
+    session = Path(session_dir).name
+    group = infer_group(session)
+    if group is None:
+        return None
+
+    stats_dir = Path(session_dir) / "RLLR_STATS"
+    full_csv = stats_dir / "full_llhi_pyr.csv"
+    contrib_csv = stats_dir / "dropone_llhi_pyr.csv"
+
+    contrib_rows = read_csv_dicts_safe(contrib_csv)
+    if not contrib_rows:
+        return None
+    full_rows = read_csv_dicts_safe(full_csv)
+
+    feat_list = [str(f).strip() for f in features]
+    whitelist = None
+    if feature_neuron_whitelist is not None:
+        whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
+
+    full_llhi: Dict[int, float] = {}
+    for r in full_rows:
+        ni = r.get("neuron_idx", r.get("neuron", None))
+        dv = r.get("llhi_full", r.get("full_llhi", None))
+        if ni is None or dv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        val = _safe_float(dv)
+        if np.isfinite(val):
+            full_llhi[idx] = float(val)
+
+    frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    for r in contrib_rows:
+        feat = str(r.get("feature", "")).strip()
+        if feat not in frac:
+            continue
+        allowed = whitelist.get(feat, None) if whitelist is not None else None
+        ni = r.get("neuron_idx", None)
+        fv = r.get("delta_llhi", None)
+        if ni is None or fv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        if allowed is not None and idx not in allowed:
+            continue
+        val = _safe_float(fv)
+        if np.isfinite(val):
+            frac[feat][idx] = float(val)
+
+    if all(len(frac[f]) == 0 for f in feat_list):
+        return None
+
+    empty_shuf = {f: {} for f in feat_list}
+    return DroponeSessionStats(
+        session=session,
+        group=group,
+        full_ll_gain=full_llhi,
+        frac_by_feature=frac,
+        shuf_mean_by_feature=empty_shuf,
+        shuf_std_by_feature=empty_shuf,
+    )
+
+
+def load_dropone_rllhi_session_stats(
+    session_dir: Path,
+    features: Iterable[str],
+    *,
+    feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+) -> Optional[DroponeSessionStats]:
+    llhi_stats = load_dropone_llhi_session_stats(
+        session_dir,
+        features,
+        feature_neuron_whitelist=feature_neuron_whitelist,
+    )
+    if llhi_stats is None:
+        return None
+
+    feat_list = [str(f).strip() for f in features]
+    rllhi_by_feature: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    for feat in feat_list:
+        for ni, delta_val in llhi_stats.frac_by_feature.get(feat, {}).items():
+            full_val = llhi_stats.full_ll_gain.get(ni, np.nan)
+            if not np.isfinite(full_val) or full_val == 0 or not np.isfinite(delta_val):
+                continue
+            rllhi_by_feature[feat][ni] = float(delta_val) / float(full_val)
+
+    if all(len(rllhi_by_feature[f]) == 0 for f in feat_list):
+        return None
+
+    empty_shuf = {f: {} for f in feat_list}
+    return DroponeSessionStats(
+        session=llhi_stats.session,
+        group=llhi_stats.group,
+        full_ll_gain=llhi_stats.full_ll_gain,
+        frac_by_feature=rllhi_by_feature,
+        shuf_mean_by_feature=empty_shuf,
+        shuf_std_by_feature=empty_shuf,
+    )
+
+
 def pooled_all(values_by_session: Dict[str, np.ndarray]) -> np.ndarray:
     pooled_list = []
     for v in values_by_session.values():
