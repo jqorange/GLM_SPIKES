@@ -24,7 +24,7 @@ from .tuning_scores import (
     compute_shuffle_scores,
     build_bins,
 )
-from contribution_utils.cell_metrics import build_dayid_to_cellinfo, pyramidal_indices_for_session
+from contribution_rllr_utils import build_dayid_to_cellinfo, pyramidal_indices_for_session
 
 
 def _write_lines(path: Path, lines):

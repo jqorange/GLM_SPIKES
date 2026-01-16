@@ -15,6 +15,7 @@ from .config import (
     ALPHA,
     CV_FOLDS,
     MAX_MISMATCH_FRAMES_50HZ,
+    MIN_SPEED_CM_S,
     N_JOBS,
     PLOT_END_SEC,
     PLOT_START_SEC,
@@ -24,7 +25,7 @@ from .config import (
     WEIGHTS_BASE,
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
-from .io_utils import load_spikes_50hz_counts, rebuild_inputs_50hz, session_paths
+from .io_utils import filter_by_min_speed, load_spikes_50hz_counts, rebuild_inputs_50hz, session_paths
 from .metrics import compute_llhi_bps_poisson, dll_bits_series_poisson, wilcoxon_greater
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
@@ -249,10 +250,14 @@ def run_one_session(session: str) -> Tuple[bool, str]:
     if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
         return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
 
-    for k in ["position", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
         data_dict[k] = data_dict[k][:T]
     Y_all = Y50[:T].astype(np.float64)
+    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
+    if speed_mask is not None and not speed_mask.any():
+        return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
 
+    T = int(data_dict["T"])
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)
     folds_idx = list(kf.split(np.arange(T)))
 

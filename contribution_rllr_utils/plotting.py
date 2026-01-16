@@ -16,6 +16,9 @@ from matplotlib.patches import Patch
 
 from glm_poisson_forward.config import VARS_ALL
 
+HEAD_POSE_FEATURE = "head_pose"
+HEAD_POSE_COMPONENTS = ("roll", "yaw", "pitch")
+
 
 @dataclass
 class DroponeSessionStats:
@@ -25,6 +28,7 @@ class DroponeSessionStats:
     frac_by_feature: Dict[str, Dict[int, float]]
     shuf_mean_by_feature: Dict[str, Dict[int, float]]
     shuf_std_by_feature: Dict[str, Dict[int, float]]
+    all_neuron_ids: Optional[Sequence[int]] = None
 
 
 @dataclass
@@ -33,6 +37,7 @@ class DroponePlotData:
     delta_pooled: Dict[str, Dict[str, np.ndarray]]
     full_pooled: Dict[str, Dict[str, np.ndarray]]
     shuf95_pooled: Dict[str, Dict[str, np.ndarray]]
+    paired_points: Dict[str, List[Tuple[float, float]]]
     kept_counts: Dict[str, int]
     total_counts: Dict[str, int]
 
@@ -123,6 +128,46 @@ def infer_group(session_name: str) -> Optional[str]:
     if "outdoor" in s:
         return "outdoor"
     return None
+
+
+def base_session_id(session_name: str) -> str:
+    base = re.sub(r"[_-]?(indoor|outdoor)$", "", session_name, flags=re.IGNORECASE)
+    return base if base else session_name
+
+
+def compute_head_pose_map(
+    frac_by_feature: Dict[str, Dict[int, float]],
+    *,
+    components: Sequence[str] = HEAD_POSE_COMPONENTS,
+    include_missing: bool = False,
+    neuron_ids: Optional[Iterable[int]] = None,
+) -> Dict[int, float]:
+    component_maps = [frac_by_feature.get(c, {}) for c in components]
+    if include_missing:
+        target_neurons = set(neuron_ids or [])
+        if not target_neurons:
+            for m in component_maps:
+                target_neurons.update(m.keys())
+    else:
+        target_neurons = set()
+        for m in component_maps:
+            target_neurons.update(m.keys())
+
+    head_pose: Dict[int, float] = {}
+    for ni in target_neurons:
+        vals = []
+        for m in component_maps:
+            v = m.get(ni, np.nan)
+            if np.isfinite(v):
+                vals.append(float(v))
+            elif include_missing:
+                vals.append(0.0)
+        if not vals:
+            if include_missing:
+                head_pose[ni] = 0.0
+            continue
+        head_pose[ni] = float(np.mean(vals))
+    return head_pose
 
 
 def load_dropone_session_stats(
@@ -343,13 +388,20 @@ def collect_dropone_plot_data(
     features: Sequence[str],
     min_full_ll_gain: float,
     compute_delta: bool = True,
+    include_missing_cells: bool = False,
+    include_head_pose: bool = False,
+    include_paired_points: bool = False,
+    head_pose_components: Sequence[str] = HEAD_POSE_COMPONENTS,
 ) -> DroponePlotData:
     feat_list = [str(f).strip() for f in features]
+    if include_head_pose and HEAD_POSE_FEATURE not in feat_list:
+        feat_list.append(HEAD_POSE_FEATURE)
 
     frac_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
     full_by_session: Dict[str, Dict[str, np.ndarray]] = {"indoor": {}, "outdoor": {}}
     delta_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
     shuf95_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
+    paired_points_raw: Dict[str, Dict[Tuple[str, int], Dict[str, float]]] = {f: {} for f in feat_list}
 
     kept_counts = {"indoor": 0, "outdoor": 0}
     total_counts = {"indoor": 0, "outdoor": 0}
@@ -359,43 +411,74 @@ def collect_dropone_plot_data(
         if g not in ("indoor", "outdoor"):
             continue
 
+        if include_missing_cells:
+            all_neurons = set(st.all_neuron_ids or [])
+            if not all_neurons:
+                all_neurons = set(st.full_ll_gain.keys())
+            total_counts[g] += len(all_neurons)
+        else:
+            all_neurons = set(st.full_ll_gain.keys())
+            for ll_gain in st.full_ll_gain.values():
+                if np.isfinite(ll_gain):
+                    total_counts[g] += 1
+
         eligible = set()
-        for ni, ll_gain in st.full_ll_gain.items():
-            if np.isfinite(ll_gain):
-                total_counts[g] += 1
-                if ll_gain >= min_full_ll_gain:
-                    eligible.add(int(ni))
-                    kept_counts[g] += 1
+        for ni in all_neurons:
+            ll_gain = st.full_ll_gain.get(ni, 0.0)
+            if not np.isfinite(ll_gain):
+                ll_gain = 0.0
+            if ll_gain >= min_full_ll_gain:
+                eligible.add(int(ni))
+                kept_counts[g] += 1
 
         if eligible:
             arr_full = np.asarray(
-                [st.full_ll_gain[ni] for ni in eligible if np.isfinite(st.full_ll_gain.get(ni, np.nan))],
+                [st.full_ll_gain.get(ni, 0.0) for ni in eligible if np.isfinite(st.full_ll_gain.get(ni, 0.0))],
                 dtype=float,
             )
             arr_full = arr_full[np.isfinite(arr_full)]
             if arr_full.size:
                 full_by_session[g][st.session] = arr_full
 
+        head_pose_map: Dict[int, float] = {}
+        if include_head_pose:
+            head_pose_map = compute_head_pose_map(
+                st.frac_by_feature,
+                components=head_pose_components,
+                include_missing=include_missing_cells,
+                neuron_ids=eligible,
+            )
+
         for f in feat_list:
-            m = st.frac_by_feature.get(f, {})
-            if not m or not eligible:
+            if f == HEAD_POSE_FEATURE:
+                m = head_pose_map
+            else:
+                m = st.frac_by_feature.get(f, {})
+            if not eligible:
                 continue
 
             vals_frac = []
             vals_delta = []
             vals_shuf95 = []
-            for ni, fracv in m.items():
-                if ni not in eligible:
-                    continue
-                ll_gain = st.full_ll_gain.get(ni, np.nan)
+            for ni in eligible:
+                fracv = m.get(ni, 0.0 if include_missing_cells else np.nan)
+                ll_gain = st.full_ll_gain.get(ni, 0.0)
                 if np.isfinite(fracv) and np.isfinite(ll_gain):
                     vals_frac.append(float(fracv))
                     if compute_delta:
                         vals_delta.append(float(fracv) * float(ll_gain))
-                mu = st.shuf_mean_by_feature.get(f, {}).get(ni, np.nan)
-                std = st.shuf_std_by_feature.get(f, {}).get(ni, np.nan)
-                if np.isfinite(mu) and np.isfinite(std) and std > 0:
-                    vals_shuf95.append(float(mu + 1.644854 * std))
+                if f != HEAD_POSE_FEATURE:
+                    mu = st.shuf_mean_by_feature.get(f, {}).get(ni, np.nan)
+                    std = st.shuf_std_by_feature.get(f, {}).get(ni, np.nan)
+                    if np.isfinite(mu) and np.isfinite(std) and std > 0:
+                        vals_shuf95.append(float(mu + 1.644854 * std))
+
+                if include_paired_points:
+                    base_id = base_session_id(st.session)
+                    key = (base_id, int(ni))
+                    if key not in paired_points_raw[f]:
+                        paired_points_raw[f][key] = {}
+                    paired_points_raw[f][key][g] = float(fracv) if np.isfinite(fracv) else 0.0
 
             arr_frac = np.asarray(vals_frac, dtype=float)
             arr_frac = arr_frac[np.isfinite(arr_frac)]
@@ -429,11 +512,21 @@ def collect_dropone_plot_data(
         "outdoor": {f: pooled_all(shuf95_by_session["outdoor"][f]) for f in feat_list},
     }
 
+    paired_points: Dict[str, List[Tuple[float, float]]] = {f: [] for f in feat_list}
+    if include_paired_points:
+        for feat, key_map in paired_points_raw.items():
+            pairs = []
+            for values in key_map.values():
+                if "indoor" in values and "outdoor" in values:
+                    pairs.append((values["indoor"], values["outdoor"]))
+            paired_points[feat] = pairs
+
     return DroponePlotData(
         frac_pooled=frac_pooled,
         delta_pooled=delta_pooled,
         full_pooled=full_pooled,
         shuf95_pooled=shuf95_pooled,
+        paired_points=paired_points,
         kept_counts=kept_counts,
         total_counts=total_counts,
     )
@@ -484,6 +577,7 @@ def plot_combined_indoor_outdoor(
     features: Sequence[str],
     data_in: Dict[str, np.ndarray],
     data_out: Dict[str, np.ndarray],
+    paired_points: Optional[Dict[str, List[Tuple[float, float]]]] = None,
     seed: int,
     max_scatter_points: int,
     ylim_pad_frac: float,
@@ -520,6 +614,20 @@ def plot_combined_indoor_outdoor(
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
         ax.scatter(x[i] + 0.18 + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+
+        if paired_points is not None:
+            pairs = paired_points.get(f, [])
+            for yin, yout in pairs:
+                if not (np.isfinite(yin) and np.isfinite(yout)):
+                    continue
+                ax.plot(
+                    [x[i] - 0.18, x[i] + 0.18],
+                    [yin, yout],
+                    color="0.5",
+                    alpha=0.35,
+                    linewidth=0.6,
+                    zorder=2,
+                )
 
     ax.set_xticks(x)
     ax.set_xticklabels(features_sorted, rotation=0)
@@ -636,6 +744,7 @@ def plot_dropone_suite(
     summary_metric: str = "dropone_rllr",
     include_delta_plot: bool = True,
     use_shuffle_line: bool = True,
+    paired_points: Optional[Dict[str, List[Tuple[float, float]]]] = None,
 ) -> Path:
     suffix = suffix_for_threshold(min_full_ll_gain)
     out_dir = Path(out_dir)
@@ -679,6 +788,7 @@ def plot_dropone_suite(
         features=features,
         data_in=plot_data.frac_pooled["indoor"],
         data_out=plot_data.frac_pooled["outdoor"],
+        paired_points=paired_points,
         seed=seed,
         max_scatter_points=max_scatter_points,
         ylim_pad_frac=ylim_pad_frac,
@@ -798,10 +908,11 @@ def plot_summary_figure(
     *,
     full_ylabel: str = "LL gain (full - intercept)",
     feature_ylabel: str = "rLLR",
+    features: Optional[Sequence[str]] = None,
 ):
     out_png.parent.mkdir(parents=True, exist_ok=True)
 
-    features = VARS_ALL[:]
+    features = list(features) if features is not None else VARS_ALL[:]
     means = [feature_stats[f][0] for f in features]
     los = [feature_stats[f][1] for f in features]
     his = [feature_stats[f][2] for f in features]
