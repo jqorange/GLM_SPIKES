@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Tuple
 
 import h5py
 import numpy as np
@@ -117,7 +117,8 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
-    head_v_bin = bin_col(dlc_df["head_v"].values, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
+    head_v = dlc_df["head_v"].values.astype(np.float32)
+    head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
     roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
@@ -126,8 +127,33 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "T": int(L),
         "position": pos_idx.astype(np.int32),
         "n_pos": int(n_pos),
+        "head_v": head_v.astype(np.float32),
         "head_v_bin": head_v_bin.astype(np.int32),
         "roll_bin": roll_bin.astype(np.int32),
         "yaw_bin": yaw_bin.astype(np.int32),
         "pitch_bin": pitch_bin.astype(np.int32),
     }
+
+
+def filter_by_min_speed(
+    data_dict: Dict[str, np.ndarray],
+    Y_all: np.ndarray,
+    min_speed_cm_s: float,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray | None]:
+    if min_speed_cm_s <= 0:
+        return data_dict, Y_all, None
+    head_v = data_dict.get("head_v")
+    if head_v is None:
+        return data_dict, Y_all, None
+    mask = head_v >= min_speed_cm_s
+    if mask.ndim != 1:
+        mask = mask.reshape(-1)
+    filtered = {}
+    for k, v in data_dict.items():
+        if isinstance(v, np.ndarray) and v.shape[0] == mask.shape[0]:
+            filtered[k] = v[mask]
+        else:
+            filtered[k] = v
+    filtered["T"] = int(np.sum(mask))
+    Y_all = Y_all[mask]
+    return filtered, Y_all, mask

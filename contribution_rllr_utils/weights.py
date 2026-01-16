@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -15,17 +15,6 @@ from tqdm import tqdm
 from glm_poisson_forward.config import CV_FOLDS, MAX_ITER, POISSON_ALPHA
 
 from .constants import MU_EPS
-
-
-def model_key_from_vars(model_vars: List[str]) -> str:
-    from glm_poisson_forward.config import VARS_ALL
-
-    if model_vars == VARS_ALL:
-        return "FULL"
-    missing = [v for v in VARS_ALL if v not in model_vars]
-    if len(missing) == 1:
-        return f"DROP_{missing[0]}"
-    return "MODEL_" + "_".join(model_vars)
 
 
 def ensure_feature_names_file(model_dir: Path, feature_names: List[str]):
@@ -232,12 +221,6 @@ def load_fold_weights(csv_path: Path, feature_names: Iterable[str]) -> np.ndarra
     return w_vec
 
 
-def load_fold_weights_compat(csv_path: Path, *args: Any, **kwargs: Any):
-    feature_names = args[0] if len(args) >= 1 else kwargs.pop("feature_names", None)
-    _ = kwargs.pop("debug", False)
-    return load_fold_weights(csv_path, feature_names=feature_names)
-
-
 def predict_oof_from_saved_weights(
     model_dir: Path,
     X_all: sparse.csr_matrix,
@@ -260,7 +243,7 @@ def predict_oof_from_saved_weights(
     T = X_all.shape[0]
     mu_oof = np.full(T, np.nan, dtype=np.float64)
 
-    for k, (tr, va) in enumerate(folds_idx, start=1):
+    for k, (_tr, va) in enumerate(folds_idx, start=1):
         csv_path = neuron_dir / f"fold{k}" / "weights.csv"
         w_vec = load_fold_weights(csv_path, feature_names=saved_feats)  # 1D vector
 

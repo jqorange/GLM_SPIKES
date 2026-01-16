@@ -26,21 +26,21 @@ from sklearn.model_selection import KFold
 from contribution_rllr_utils import (
     CI_HI,
     CI_LO,
+    HEAD_POSE_COMPONENTS,
+    HEAD_POSE_FEATURE,
     MU_EPS,
     N_BOOT,
     RLLR_FITS_DIRNAME,
     RLLR_STATS_DIRNAME,
     DroponeSessionStats,
     build_oof_intercept_mu,
+    compute_head_pose_map,
     collect_dropone_plot_data,
     hierarchical_bootstrap_mean,
     load_forward_selected_models,
     plot_dropone_suite,
     plot_summary_figure,
     poisson_loglik,
-)
-from glm_poisson_forward.metrics import compute_llhi_bps_poisson
-from contribution_utils import (
     build_dayid_to_cellinfo,
     load_feature_names_file,
     load_fold_weights,
@@ -48,11 +48,13 @@ from contribution_utils import (
     predict_oof_from_saved_weights,
     save_weights_for_model,
 )
+from glm_poisson_forward.metrics import compute_llhi_bps_poisson
 from glm_poisson_forward.config import (
     CV_FOLDS,
     DLC_ROOT,
     IMU_ROOT,
     MAX_MISMATCH_FRAMES_50HZ,
+    MIN_SPEED_CM_S,
     N_JOBS,
     POSITION_ROOT,
     SEED,
@@ -62,6 +64,7 @@ from glm_poisson_forward.config import (
 )
 from glm_poisson_forward.design_matrix import build_design_matrix, model_key_from_vars as forward_model_key
 from glm_poisson_forward.io_utils import (
+    filter_by_min_speed,
     list_sessions_dlc_final,
     list_sessions_imu,
     list_sessions_position,
@@ -74,6 +77,9 @@ from glm_poisson_forward.io_utils import (
 MIN_FULL_LL_GAIN = 0.0
 MIN_FULL_LLHI = 0.0
 POSITIVE_CONTRIB_ONLY = False
+INCLUDE_UNFIT_CELLS = False
+LINK_INDOOR_OUTDOOR_PAIRS = False
+INCLUDE_HEAD_POSE = True
 
 
 @dataclass
@@ -84,6 +90,7 @@ class SessionResult:
     contrib_rllr_by_feature_by_neuron: Dict[str, Dict[int, float]]
     full_llhi_by_neuron: Dict[int, float]
     contrib_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    pyramidal_neurons: np.ndarray
 
 
 def compute_session_rllr(
@@ -119,9 +126,14 @@ def compute_session_rllr(
         return None
 
     T = min(T_cov, T_spk)
-    for k in ["position", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
         data_dict[k] = data_dict[k][:T]
     Y_all = Y50[:T].astype(np.float64)
+    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
+    if speed_mask is not None and not speed_mask.any():
+        print(f"[SKIP] {session}: no samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
+        return None
+    T = int(data_dict["T"])
 
     pyr_idx = pyramidal_indices_for_session(session, dayid2cellinfo, N_NEURONS)
     if pyr_idx is None or pyr_idx.size == 0:
@@ -235,6 +247,7 @@ def compute_session_rllr(
             contrib_rllr_by_feature_by_neuron=contrib,
             full_llhi_by_neuron=full_llhi_map,
             contrib_delta_llhi_by_feature_by_neuron=contrib_llhi,
+            pyramidal_neurons=pyr_idx,
         )
 
     need_rllr = not has_rllr
@@ -472,6 +485,7 @@ def compute_session_rllr(
         contrib_rllr_by_feature_by_neuron=contrib_rllr,
         full_llhi_by_neuron=full_llhi_by_neuron,
         contrib_delta_llhi_by_feature_by_neuron=contrib_delta_llhi,
+        pyramidal_neurons=pyr_idx,
     )
 
 
@@ -523,10 +537,15 @@ def main():
                     contrib_rllr_by_feature_by_neuron=filtered,
                     full_llhi_by_neuron=r.full_llhi_by_neuron,
                     contrib_delta_llhi_by_feature_by_neuron=filtered_llhi,
+                    pyramidal_neurons=r.pyramidal_neurons,
                 )
             )
     else:
         filtered_results = results
+
+    plot_features = VARS_ALL[:]
+    if INCLUDE_HEAD_POSE and HEAD_POSE_FEATURE not in plot_features:
+        plot_features.append(HEAD_POSE_FEATURE)
 
     rllr_stats = [
         DroponeSessionStats(
@@ -536,6 +555,7 @@ def main():
             frac_by_feature=r.contrib_rllr_by_feature_by_neuron,
             shuf_mean_by_feature={v: {} for v in VARS_ALL},
             shuf_std_by_feature={v: {} for v in VARS_ALL},
+            all_neuron_ids=r.pyramidal_neurons.tolist(),
         )
         for r in filtered_results
         if r.full_ll_gain_by_neuron and any(r.contrib_rllr_by_feature_by_neuron.values())
@@ -543,13 +563,17 @@ def main():
     if rllr_stats:
         dropone_plot_data = collect_dropone_plot_data(
             rllr_stats,
-            features=VARS_ALL,
+            features=plot_features,
             min_full_ll_gain=MIN_FULL_LL_GAIN,
             compute_delta=True,
+            include_missing_cells=INCLUDE_UNFIT_CELLS,
+            include_head_pose=INCLUDE_HEAD_POSE,
+            include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+            head_pose_components=HEAD_POSE_COMPONENTS,
         )
         summary_csv = plot_dropone_suite(
             WEIGHTS_BASE / "RLLR_SUMMARY",
-            features=VARS_ALL,
+            features=plot_features,
             plot_data=dropone_plot_data,
             min_full_ll_gain=MIN_FULL_LL_GAIN,
             seed=SEED,
@@ -562,6 +586,7 @@ def main():
             summary_metric="dropone_rllr",
             include_delta_plot=True,
             use_shuffle_line=False,
+            paired_points=dropone_plot_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
         )
         print(
             f"[OK] Drop-one boxplots (full LL gain ≥ {MIN_FULL_LL_GAIN:g}): "
@@ -580,6 +605,7 @@ def main():
             frac_by_feature=r.contrib_delta_llhi_by_feature_by_neuron,
             shuf_mean_by_feature={v: {} for v in VARS_ALL},
             shuf_std_by_feature={v: {} for v in VARS_ALL},
+            all_neuron_ids=r.pyramidal_neurons.tolist(),
         )
         for r in filtered_results
         if r.full_llhi_by_neuron and any(r.contrib_delta_llhi_by_feature_by_neuron.values())
@@ -587,13 +613,17 @@ def main():
     if llhi_stats:
         dropone_llhi_data = collect_dropone_plot_data(
             llhi_stats,
-            features=VARS_ALL,
+            features=plot_features,
             min_full_ll_gain=MIN_FULL_LLHI,
             compute_delta=False,
+            include_missing_cells=INCLUDE_UNFIT_CELLS,
+            include_head_pose=INCLUDE_HEAD_POSE,
+            include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+            head_pose_components=HEAD_POSE_COMPONENTS,
         )
         llhi_summary_csv = plot_dropone_suite(
             WEIGHTS_BASE / "LLHI_SUMMARY",
-            features=VARS_ALL,
+            features=plot_features,
             plot_data=dropone_llhi_data,
             min_full_ll_gain=MIN_FULL_LLHI,
             seed=SEED,
@@ -606,6 +636,7 @@ def main():
             summary_metric="dropone_delta_llhi",
             include_delta_plot=False,
             use_shuffle_line=False,
+            paired_points=dropone_llhi_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
         )
         print(
             f"[OK] Drop-one LLHI boxplots (full LLHI ≥ {MIN_FULL_LLHI:g}): "
@@ -636,19 +667,24 @@ def main():
                     frac_by_feature=rllhi_by_feature,
                     shuf_mean_by_feature={v: {} for v in VARS_ALL},
                     shuf_std_by_feature={v: {} for v in VARS_ALL},
+                    all_neuron_ids=r.pyramidal_neurons.tolist(),
                 )
             )
 
     if rllhi_stats:
         dropone_rllhi_data = collect_dropone_plot_data(
             rllhi_stats,
-            features=VARS_ALL,
+            features=plot_features,
             min_full_ll_gain=MIN_FULL_LLHI,
             compute_delta=False,
+            include_missing_cells=INCLUDE_UNFIT_CELLS,
+            include_head_pose=INCLUDE_HEAD_POSE,
+            include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+            head_pose_components=HEAD_POSE_COMPONENTS,
         )
         rllhi_summary_csv = plot_dropone_suite(
             WEIGHTS_BASE / "RLLHI_SUMMARY",
-            features=VARS_ALL,
+            features=plot_features,
             plot_data=dropone_rllhi_data,
             min_full_ll_gain=MIN_FULL_LLHI,
             seed=SEED,
@@ -661,6 +697,7 @@ def main():
             summary_metric="dropone_rllhi",
             include_delta_plot=False,
             use_shuffle_line=False,
+            paired_points=dropone_rllhi_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
         )
         print(
             f"[OK] Drop-one rLLHI boxplots (full LLHI ≥ {MIN_FULL_LLHI:g}): "
@@ -685,10 +722,19 @@ def main():
         full_stat = hierarchical_bootstrap_mean(sess_full, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
 
         feature_stats: Dict[str, Tuple[float, float, float]] = {}
-        for feat in VARS_ALL:
+        for feat in plot_features:
             sess_feat: Dict[str, np.ndarray] = {}
             for r in group_res:
-                arr = np.array(list(r.contrib_rllr_by_feature_by_neuron[feat].values()), dtype=np.float64)
+                if feat == HEAD_POSE_FEATURE:
+                    head_pose_map = compute_head_pose_map(
+                        r.contrib_rllr_by_feature_by_neuron,
+                        components=HEAD_POSE_COMPONENTS,
+                        include_missing=INCLUDE_UNFIT_CELLS,
+                        neuron_ids=r.pyramidal_neurons.tolist(),
+                    )
+                    arr = np.array(list(head_pose_map.values()), dtype=np.float64)
+                else:
+                    arr = np.array(list(r.contrib_rllr_by_feature_by_neuron[feat].values()), dtype=np.float64)
                 sess_feat[r.session] = arr
             feature_stats[feat] = hierarchical_bootstrap_mean(sess_feat, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
 
@@ -700,6 +746,7 @@ def main():
             feature_stats=feature_stats,
             full_ylabel="LL gain (full - intercept)",
             feature_ylabel="rLLR",
+            features=plot_features,
         )
         print(f"[OK] Saved: {out_png}")
 
@@ -713,7 +760,7 @@ def main():
                 "ci_hi": full_stat[2],
             }
         ]
-        for feat in VARS_ALL:
+        for feat in plot_features:
             m, lo, hi = feature_stats[feat]
             rows.append({"group": group, "metric": "rllr", "feature": feat, "mean": m, "ci_lo": lo, "ci_hi": hi})
         pd.DataFrame(rows).to_csv(WEIGHTS_BASE / f"RLLR_DROPONE_PYR_{group}_summary.csv", index=False)
@@ -732,10 +779,19 @@ def main():
         full_stat = hierarchical_bootstrap_mean(sess_full, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
 
         feature_stats = {}
-        for feat in VARS_ALL:
+        for feat in plot_features:
             sess_feat = {}
             for r in group_res:
-                arr = np.array(list(r.contrib_delta_llhi_by_feature_by_neuron[feat].values()), dtype=np.float64)
+                if feat == HEAD_POSE_FEATURE:
+                    head_pose_map = compute_head_pose_map(
+                        r.contrib_delta_llhi_by_feature_by_neuron,
+                        components=HEAD_POSE_COMPONENTS,
+                        include_missing=INCLUDE_UNFIT_CELLS,
+                        neuron_ids=r.pyramidal_neurons.tolist(),
+                    )
+                    arr = np.array(list(head_pose_map.values()), dtype=np.float64)
+                else:
+                    arr = np.array(list(r.contrib_delta_llhi_by_feature_by_neuron[feat].values()), dtype=np.float64)
                 sess_feat[r.session] = arr
             feature_stats[feat] = hierarchical_bootstrap_mean(sess_feat, n_boot=N_BOOT, ci_lo=CI_LO, ci_hi=CI_HI, seed=SEED)
 
@@ -747,6 +803,7 @@ def main():
             feature_stats=feature_stats,
             full_ylabel="LLHI (full - mean-rate)",
             feature_ylabel="ΔLLHI (bits/spike)",
+            features=plot_features,
         )
         print(f"[OK] Saved: {out_png}")
 
@@ -760,7 +817,7 @@ def main():
                 "ci_hi": full_stat[2],
             }
         ]
-        for feat in VARS_ALL:
+        for feat in plot_features:
             m, lo, hi = feature_stats[feat]
             rows.append({"group": group, "metric": "delta_llhi", "feature": feat, "mean": m, "ci_lo": lo, "ci_hi": hi})
         pd.DataFrame(rows).to_csv(WEIGHTS_BASE / f"LLHI_DROPONE_PYR_{group}_summary.csv", index=False)
