@@ -298,6 +298,8 @@ def load_dropone_llhi_session_stats(
             full_llhi[idx] = float(val)
 
     frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_mean: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_std: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
     for r in contrib_rows:
         feat = str(r.get("feature", "")).strip()
         if feat not in frac:
@@ -305,6 +307,8 @@ def load_dropone_llhi_session_stats(
         allowed = whitelist.get(feat, None) if whitelist is not None else None
         ni = r.get("neuron_idx", None)
         fv = r.get("delta_llhi", None)
+        mu = r.get("delta_llhi_shuf_mean", None)
+        std = r.get("delta_llhi_shuf_std", None)
         if ni is None or fv is None:
             continue
         try:
@@ -316,18 +320,23 @@ def load_dropone_llhi_session_stats(
         val = _safe_float(fv)
         if np.isfinite(val):
             frac[feat][idx] = float(val)
+        mu_val = _safe_float(mu)
+        if np.isfinite(mu_val):
+            shuf_mean[feat][idx] = float(mu_val)
+        std_val = _safe_float(std)
+        if np.isfinite(std_val):
+            shuf_std[feat][idx] = float(std_val)
 
     if all(len(frac[f]) == 0 for f in feat_list):
         return None
 
-    empty_shuf = {f: {} for f in feat_list}
     return DroponeSessionStats(
         session=session,
         group=group,
         full_ll_gain=full_llhi,
         frac_by_feature=frac,
-        shuf_mean_by_feature=empty_shuf,
-        shuf_std_by_feature=empty_shuf,
+        shuf_mean_by_feature=shuf_mean,
+        shuf_std_by_feature=shuf_std,
     )
 
 
@@ -336,6 +345,7 @@ def load_dropone_rllhi_session_stats(
     features: Iterable[str],
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+    use_zscore: bool = False,
 ) -> Optional[DroponeSessionStats]:
     llhi_stats = load_dropone_llhi_session_stats(
         session_dir,
@@ -347,24 +357,37 @@ def load_dropone_rllhi_session_stats(
 
     feat_list = [str(f).strip() for f in features]
     rllhi_by_feature: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    rllhi_shuf_mean: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    rllhi_shuf_std: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
     for feat in feat_list:
         for ni, delta_val in llhi_stats.frac_by_feature.get(feat, {}).items():
             full_val = llhi_stats.full_ll_gain.get(ni, np.nan)
             if not np.isfinite(full_val) or full_val == 0 or not np.isfinite(delta_val):
                 continue
-            rllhi_by_feature[feat][ni] = float(delta_val) / float(full_val)
+            rllhi_val = float(delta_val) / float(full_val)
+            mu_delta = llhi_stats.shuf_mean_by_feature.get(feat, {}).get(ni, np.nan)
+            std_delta = llhi_stats.shuf_std_by_feature.get(feat, {}).get(ni, np.nan)
+            if np.isfinite(mu_delta) and np.isfinite(std_delta):
+                rllhi_shuf_mean[feat][ni] = float(mu_delta) / float(full_val)
+                rllhi_shuf_std[feat][ni] = float(std_delta) / float(abs(full_val))
+            if use_zscore:
+                mu = rllhi_shuf_mean[feat].get(ni, np.nan)
+                std = rllhi_shuf_std[feat].get(ni, np.nan)
+                if np.isfinite(mu) and np.isfinite(std) and std > 0:
+                    rllhi_by_feature[feat][ni] = float((rllhi_val - mu) / std)
+            else:
+                rllhi_by_feature[feat][ni] = rllhi_val
 
     if all(len(rllhi_by_feature[f]) == 0 for f in feat_list):
         return None
 
-    empty_shuf = {f: {} for f in feat_list}
     return DroponeSessionStats(
         session=llhi_stats.session,
         group=llhi_stats.group,
         full_ll_gain=llhi_stats.full_ll_gain,
         frac_by_feature=rllhi_by_feature,
-        shuf_mean_by_feature=empty_shuf,
-        shuf_std_by_feature=empty_shuf,
+        shuf_mean_by_feature=rllhi_shuf_mean,
+        shuf_std_by_feature=rllhi_shuf_std,
     )
 
 
