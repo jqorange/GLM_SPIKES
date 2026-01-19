@@ -11,7 +11,7 @@ Drop-one contribution plotting (pyramidal-only) with:
   - Filter: only neurons with full LL gain/LLHI >= threshold enter downstream analysis
   - Use --metric rllr to plot contribution_rllr outputs (uses RLLR_STATS + full LL gain filter).
   - Use --metric llhi or rllhi to plot contribution_rllr LLHI outputs (full_llhi_pyr.csv/dropone_llhi_pyr.csv).
-  - By default, uses shuffle-normalized z-scores when available (use --use_raw for fractions)
+  - By default, uses shuffle-normalized z-scores for rllr/rllhi when available (use --use_raw for fractions)
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
 Inputs per session:
@@ -122,7 +122,7 @@ def main():
         raise SystemExit("[FATAL] --features parsed to empty list.")
 
     use_zscore = not args.use_raw
-    if args.metric in {"llhi", "rllhi"}:
+    if args.metric == "llhi":
         use_zscore = False
 
     weights_base = Path(args.weights_base)
@@ -163,6 +163,7 @@ def main():
                 sess_dir,
                 features=features,
                 feature_neuron_whitelist=whitelist,
+                use_zscore=use_zscore,
             )
         if st is not None and args.positive_only:
             filtered_frac = {}
@@ -260,13 +261,13 @@ def main():
             seed=args.seed,
             max_scatter_points=args.max_scatter_points,
             ylim_pad_frac=args.ylim_pad_frac,
-            use_zscore=False,
-            metric_tag="rllhi",
+            use_zscore=use_zscore,
+            metric_tag="rllhi_z" if use_zscore else "rllhi",
             ylabel="rLLHI (ΔLLHI / LLHI_full)",
             title_metric="drop-one contribution",
-            summary_metric="dropone_rllhi",
+            summary_metric="dropone_rllhi_z" if use_zscore else "dropone_rllhi",
             include_delta_plot=False,
-            use_shuffle_line=False,
+            use_shuffle_line=use_zscore,
         )
 
     print(f"[OK] Sessions loaded: {len(sess_stats)}")

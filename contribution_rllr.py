@@ -4,10 +4,9 @@
 Compute Poisson-GLM drop-one contributions using rLLR normalization with forward-selected
 (full) models. Full model is the forward-search-selected subset per neuron; drop-one
 models remove a single covariate from that subset. Contributions are computed as the
-relative log-likelihood ratio (rLLR) without label-shuffle z-scoring. This pipeline
-reuses saved 10-fold weights from
-GLM_Poisson_forward. Drop-one models are (re)fit per neuron and cached under a
-drop_one/ folder for reuse.
+relative log-likelihood ratio (rLLR) and include label-shuffle z-scoring. This pipeline
+reuses saved 10-fold weights from GLM_Poisson_forward. Drop-one models are (re)fit per
+neuron and cached under a drop_one/ folder for reuse.
 """
 
 from __future__ import annotations
@@ -80,6 +79,7 @@ POSITIVE_CONTRIB_ONLY = False
 INCLUDE_UNFIT_CELLS = False
 LINK_INDOOR_OUTDOOR_PAIRS = False
 INCLUDE_HEAD_POSE = True
+N_SHUFFLE = 200
 
 
 @dataclass
@@ -88,8 +88,12 @@ class SessionResult:
     group: str
     full_ll_gain_by_neuron: Dict[int, float]
     contrib_rllr_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    shuf_mean_rllr_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    shuf_std_rllr_by_feature_by_neuron: Dict[str, Dict[int, float]]
     full_llhi_by_neuron: Dict[int, float]
     contrib_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    shuf_mean_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
+    shuf_std_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
     pyramidal_neurons: np.ndarray
 
 
@@ -99,6 +103,12 @@ def compute_session_rllr(
     *,
     n_jobs: int = N_JOBS,
 ) -> Optional[SessionResult]:
+    def zscore(value: float, mu: float, sigma: float) -> float:
+        if not (np.isfinite(value) and np.isfinite(mu) and np.isfinite(sigma)):
+            return float("nan")
+        if sigma <= MU_EPS:
+            return float("nan")
+        return float((value - mu) / sigma)
     sess_dir = WEIGHTS_BASE / session
     sess_dir.mkdir(parents=True, exist_ok=True)
 
@@ -216,42 +226,74 @@ def compute_session_rllr(
 
     full_map: Dict[int, float] = {}
     contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    shuf_mean_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    shuf_std_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
     full_llhi_map: Dict[int, float] = {}
     contrib_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    shuf_mean_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    shuf_std_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
 
     has_rllr = False
+    has_rllr_shuffle = False
     if full_csv.exists() and contrib_csv.exists():
         df_full = pd.read_csv(full_csv)
         df_con = pd.read_csv(contrib_csv)
         has_rllr = ("ll_gain" in df_full.columns) and ("rllr" in df_con.columns)
+        has_rllr_shuffle = ("rllr_shuf_mean" in df_con.columns) and ("rllr_shuf_std" in df_con.columns)
         if has_rllr:
             full_map = {int(r["neuron_idx"]): float(r["ll_gain"]) for _, r in df_full.iterrows()}
             for _, r in df_con.iterrows():
-                contrib[str(r["feature"])][int(r["neuron_idx"])] = float(r["rllr"])
+                feat = str(r["feature"])
+                ni = int(r["neuron_idx"])
+                contrib[feat][ni] = float(r["rllr"])
+                if has_rllr_shuffle:
+                    mu = r.get("rllr_shuf_mean", np.nan)
+                    std = r.get("rllr_shuf_std", np.nan)
+                    if np.isfinite(mu):
+                        shuf_mean_rllr[feat][ni] = float(mu)
+                    if np.isfinite(std):
+                        shuf_std_rllr[feat][ni] = float(std)
 
     has_llhi = False
+    has_llhi_shuffle = False
     if full_llhi_csv.exists() and contrib_llhi_csv.exists():
         df_full_llhi = pd.read_csv(full_llhi_csv)
         df_con_llhi = pd.read_csv(contrib_llhi_csv)
         has_llhi = ("llhi_full" in df_full_llhi.columns) and ("delta_llhi" in df_con_llhi.columns)
+        has_llhi_shuffle = ("delta_llhi_shuf_mean" in df_con_llhi.columns) and ("delta_llhi_shuf_std" in df_con_llhi.columns)
         if has_llhi:
             full_llhi_map = {int(r["neuron_idx"]): float(r["llhi_full"]) for _, r in df_full_llhi.iterrows()}
             for _, r in df_con_llhi.iterrows():
-                contrib_llhi[str(r["feature"])][int(r["neuron_idx"])] = float(r["delta_llhi"])
+                feat = str(r["feature"])
+                ni = int(r["neuron_idx"])
+                contrib_llhi[feat][ni] = float(r["delta_llhi"])
+                if has_llhi_shuffle:
+                    mu = r.get("delta_llhi_shuf_mean", np.nan)
+                    std = r.get("delta_llhi_shuf_std", np.nan)
+                    if np.isfinite(mu):
+                        shuf_mean_llhi[feat][ni] = float(mu)
+                    if np.isfinite(std):
+                        shuf_std_llhi[feat][ni] = float(std)
 
-    if has_rllr and has_llhi:
+    if has_rllr and has_llhi and has_rllr_shuffle and has_llhi_shuffle:
         return SessionResult(
             session=session,
             group=group,
             full_ll_gain_by_neuron=full_map,
             contrib_rllr_by_feature_by_neuron=contrib,
+            shuf_mean_rllr_by_feature_by_neuron=shuf_mean_rllr,
+            shuf_std_rllr_by_feature_by_neuron=shuf_std_rllr,
             full_llhi_by_neuron=full_llhi_map,
             contrib_delta_llhi_by_feature_by_neuron=contrib_llhi,
+            shuf_mean_delta_llhi_by_feature_by_neuron=shuf_mean_llhi,
+            shuf_std_delta_llhi_by_feature_by_neuron=shuf_std_llhi,
             pyramidal_neurons=pyr_idx,
         )
 
     need_rllr = not has_rllr
     need_llhi = not has_llhi
+    need_rllr_shuffle = not has_rllr_shuffle
+    need_llhi_shuffle = not has_llhi_shuffle
 
     full_ll_gain_by_neuron: Dict[int, float] = full_map.copy()
     ll_full_by_neuron: Dict[int, float] = {}
@@ -259,6 +301,10 @@ def compute_session_rllr(
     full_llhi_by_neuron: Dict[int, float] = full_llhi_map.copy()
     contrib_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
     contrib_delta_llhi: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+    shuf_mean_rllr = {v: dict(shuf_mean_rllr.get(v, {})) for v in VARS_ALL}
+    shuf_std_rllr = {v: dict(shuf_std_rllr.get(v, {})) for v in VARS_ALL}
+    shuf_mean_llhi = {v: dict(shuf_mean_llhi.get(v, {})) for v in VARS_ALL}
+    shuf_std_llhi = {v: dict(shuf_std_llhi.get(v, {})) for v in VARS_ALL}
     if has_rllr:
         contrib_rllr = contrib
     if has_llhi:
@@ -342,6 +388,53 @@ def compute_session_rllr(
                 failed_drop_predict += 1
             total_drop_models += 1
 
+        if need_rllr_shuffle or need_llhi_shuffle:
+            rng = np.random.default_rng(SEED + int(ni))
+            shuf_rllr_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
+            shuf_llhi_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
+            for _ in range(N_SHUFFLE):
+                y_shuf = y[rng.permutation(y.size)]
+                if need_rllr_shuffle:
+                    mu0_shuf = build_oof_intercept_mu(y_shuf, folds_idx)
+                    ll0_shuf = poisson_loglik(y_shuf, mu0_shuf)
+                    ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
+                else:
+                    ll0_shuf = np.nan
+                    ll_full_shuf = np.nan
+
+                if need_llhi_shuffle:
+                    llhi_full_shuf = compute_llhi_bps_poisson(y_shuf, mu_oof_full)
+                else:
+                    llhi_full_shuf = np.nan
+
+                for v, mu_red in mu_oof_red_by_feat.items():
+                    if need_rllr_shuffle:
+                        ll_red_shuf = poisson_loglik(y_shuf, mu_red)
+                        denom = ll_full_shuf - ll0_shuf
+                        if not np.isfinite(denom) or denom <= 0:
+                            rllr_shuf = float("nan")
+                        else:
+                            rllr_shuf = float((ll_full_shuf - ll_red_shuf) / denom)
+                        shuf_rllr_vals[v].append(rllr_shuf)
+
+                    if need_llhi_shuffle:
+                        llhi_red_shuf = compute_llhi_bps_poisson(y_shuf, mu_red)
+                        shuf_llhi_vals[v].append(float(llhi_full_shuf - llhi_red_shuf))
+
+            for v in full_vars:
+                if need_rllr_shuffle:
+                    arr = np.asarray(shuf_rllr_vals.get(v, []), dtype=float)
+                    arr = arr[np.isfinite(arr)]
+                    if arr.size:
+                        shuf_mean_rllr[v][ni] = float(np.mean(arr))
+                        shuf_std_rllr[v][ni] = float(np.std(arr))
+                if need_llhi_shuffle:
+                    arr = np.asarray(shuf_llhi_vals.get(v, []), dtype=float)
+                    arr = arr[np.isfinite(arr)]
+                    if arr.size:
+                        shuf_mean_llhi[v][ni] = float(np.mean(arr))
+                        shuf_std_llhi[v][ni] = float(np.std(arr))
+
         for v in full_vars:
             if v not in mu_oof_red_by_feat:
                 if need_rllr:
@@ -396,6 +489,8 @@ def compute_session_rllr(
         rows = []
         for v in VARS_ALL:
             for ni, frac in contrib_rllr[v].items():
+                mu = shuf_mean_rllr[v].get(ni, float("nan"))
+                std = shuf_std_rllr[v].get(ni, float("nan"))
                 rows.append(
                     {
                         "session": session,
@@ -403,6 +498,9 @@ def compute_session_rllr(
                         "feature": v,
                         "neuron_idx": ni,
                         "rllr": frac,
+                        "rllr_shuf_mean": mu,
+                        "rllr_shuf_std": std,
+                        "rllr_z": zscore(frac, mu, std),
                     }
                 )
         if not rows:
@@ -415,6 +513,9 @@ def compute_session_rllr(
                 "feature",
                 "neuron_idx",
                 "rllr",
+                "rllr_shuf_mean",
+                "rllr_shuf_std",
+                "rllr_z",
             ],
         ).to_csv(contrib_csv, index=False)
 
@@ -443,6 +544,8 @@ def compute_session_rllr(
         llhi_rows = []
         for v in VARS_ALL:
             for ni, delta in contrib_delta_llhi[v].items():
+                mu = shuf_mean_llhi[v].get(ni, float("nan"))
+                std = shuf_std_llhi[v].get(ni, float("nan"))
                 llhi_rows.append(
                     {
                         "session": session,
@@ -450,6 +553,9 @@ def compute_session_rllr(
                         "feature": v,
                         "neuron_idx": ni,
                         "delta_llhi": delta,
+                        "delta_llhi_shuf_mean": mu,
+                        "delta_llhi_shuf_std": std,
+                        "delta_llhi_z": zscore(delta, mu, std),
                     }
                 )
         if not llhi_rows:
@@ -462,6 +568,9 @@ def compute_session_rllr(
                 "feature",
                 "neuron_idx",
                 "delta_llhi",
+                "delta_llhi_shuf_mean",
+                "delta_llhi_shuf_std",
+                "delta_llhi_z",
             ],
         ).to_csv(contrib_llhi_csv, index=False)
 
@@ -483,8 +592,12 @@ def compute_session_rllr(
         group=group,
         full_ll_gain_by_neuron=full_ll_gain_by_neuron,
         contrib_rllr_by_feature_by_neuron=contrib_rllr,
+        shuf_mean_rllr_by_feature_by_neuron=shuf_mean_rllr,
+        shuf_std_rllr_by_feature_by_neuron=shuf_std_rllr,
         full_llhi_by_neuron=full_llhi_by_neuron,
         contrib_delta_llhi_by_feature_by_neuron=contrib_delta_llhi,
+        shuf_mean_delta_llhi_by_feature_by_neuron=shuf_mean_llhi,
+        shuf_std_delta_llhi_by_feature_by_neuron=shuf_std_llhi,
         pyramidal_neurons=pyr_idx,
     )
 
@@ -535,8 +648,12 @@ def main():
                     group=r.group,
                     full_ll_gain_by_neuron=r.full_ll_gain_by_neuron,
                     contrib_rllr_by_feature_by_neuron=filtered,
+                    shuf_mean_rllr_by_feature_by_neuron=r.shuf_mean_rllr_by_feature_by_neuron,
+                    shuf_std_rllr_by_feature_by_neuron=r.shuf_std_rllr_by_feature_by_neuron,
                     full_llhi_by_neuron=r.full_llhi_by_neuron,
                     contrib_delta_llhi_by_feature_by_neuron=filtered_llhi,
+                    shuf_mean_delta_llhi_by_feature_by_neuron=r.shuf_mean_delta_llhi_by_feature_by_neuron,
+                    shuf_std_delta_llhi_by_feature_by_neuron=r.shuf_std_delta_llhi_by_feature_by_neuron,
                     pyramidal_neurons=r.pyramidal_neurons,
                 )
             )
@@ -553,8 +670,8 @@ def main():
             group=r.group,
             full_ll_gain=r.full_ll_gain_by_neuron,
             frac_by_feature=r.contrib_rllr_by_feature_by_neuron,
-            shuf_mean_by_feature={v: {} for v in VARS_ALL},
-            shuf_std_by_feature={v: {} for v in VARS_ALL},
+            shuf_mean_by_feature=r.shuf_mean_rllr_by_feature_by_neuron,
+            shuf_std_by_feature=r.shuf_std_rllr_by_feature_by_neuron,
             all_neuron_ids=r.pyramidal_neurons.tolist(),
         )
         for r in filtered_results
@@ -594,6 +711,58 @@ def main():
             f"outdoor {dropone_plot_data.kept_counts['outdoor']}/{dropone_plot_data.total_counts['outdoor']}",
         )
         print(f"[OK] Summary CSV: {summary_csv}")
+
+        rllr_z_stats = []
+        for r in filtered_results:
+            z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+            for feat in VARS_ALL:
+                for ni, val in r.contrib_rllr_by_feature_by_neuron.get(feat, {}).items():
+                    mu = r.shuf_mean_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                    std = r.shuf_std_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                    if np.isfinite(val) and np.isfinite(mu) and np.isfinite(std) and std > MU_EPS:
+                        z_by_feature[feat][ni] = float((val - mu) / std)
+            if any(z_by_feature.values()):
+                rllr_z_stats.append(
+                    DroponeSessionStats(
+                        session=r.session,
+                        group=r.group,
+                        full_ll_gain=r.full_ll_gain_by_neuron,
+                        frac_by_feature=z_by_feature,
+                        shuf_mean_by_feature=r.shuf_mean_rllr_by_feature_by_neuron,
+                        shuf_std_by_feature=r.shuf_std_rllr_by_feature_by_neuron,
+                        all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    )
+                )
+
+        if rllr_z_stats:
+            rllr_z_plot_data = collect_dropone_plot_data(
+                rllr_z_stats,
+                features=plot_features,
+                min_full_ll_gain=MIN_FULL_LL_GAIN,
+                compute_delta=False,
+                include_missing_cells=INCLUDE_UNFIT_CELLS,
+                include_head_pose=INCLUDE_HEAD_POSE,
+                include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+                head_pose_components=HEAD_POSE_COMPONENTS,
+            )
+            rllr_z_summary_csv = plot_dropone_suite(
+                WEIGHTS_BASE / "RLLR_SUMMARY",
+                features=plot_features,
+                plot_data=rllr_z_plot_data,
+                min_full_ll_gain=MIN_FULL_LL_GAIN,
+                seed=SEED,
+                max_scatter_points=0,
+                ylim_pad_frac=0.08,
+                use_zscore=True,
+                metric_tag="rllr_z",
+                ylabel="rLLR",
+                title_metric="drop-one contribution",
+                summary_metric="dropone_rllr_z",
+                include_delta_plot=False,
+                use_shuffle_line=True,
+                paired_points=rllr_z_plot_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
+            )
+            print(f"[OK] rLLR z-score Summary CSV: {rllr_z_summary_csv}")
     else:
         print("[WARN] No rLLR stats available for plotting.")
 
@@ -603,8 +772,8 @@ def main():
             group=r.group,
             full_ll_gain=r.full_llhi_by_neuron,
             frac_by_feature=r.contrib_delta_llhi_by_feature_by_neuron,
-            shuf_mean_by_feature={v: {} for v in VARS_ALL},
-            shuf_std_by_feature={v: {} for v in VARS_ALL},
+            shuf_mean_by_feature=r.shuf_mean_delta_llhi_by_feature_by_neuron,
+            shuf_std_by_feature=r.shuf_std_delta_llhi_by_feature_by_neuron,
             all_neuron_ids=r.pyramidal_neurons.tolist(),
         )
         for r in filtered_results
@@ -705,6 +874,69 @@ def main():
             f"outdoor {dropone_rllhi_data.kept_counts['outdoor']}/{dropone_rllhi_data.total_counts['outdoor']}",
         )
         print(f"[OK] rLLHI Summary CSV: {rllhi_summary_csv}")
+
+        rllhi_z_stats = []
+        for r in filtered_results:
+            rllhi_z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+            rllhi_shuf_mean: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+            rllhi_shuf_std: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+            for feat in VARS_ALL:
+                for ni, delta_val in r.contrib_delta_llhi_by_feature_by_neuron.get(feat, {}).items():
+                    full_val = r.full_llhi_by_neuron.get(ni, np.nan)
+                    if not np.isfinite(full_val) or full_val == 0 or not np.isfinite(delta_val):
+                        continue
+                    rllhi_val = float(delta_val) / float(full_val)
+                    mu_delta = r.shuf_mean_delta_llhi_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                    std_delta = r.shuf_std_delta_llhi_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                    if np.isfinite(mu_delta) and np.isfinite(std_delta):
+                        mu_rllhi = float(mu_delta) / float(full_val)
+                        std_rllhi = float(std_delta) / float(abs(full_val))
+                        rllhi_shuf_mean[feat][ni] = mu_rllhi
+                        rllhi_shuf_std[feat][ni] = std_rllhi
+                        if std_rllhi > MU_EPS:
+                            rllhi_z_by_feature[feat][ni] = float((rllhi_val - mu_rllhi) / std_rllhi)
+            if any(rllhi_z_by_feature.values()):
+                rllhi_z_stats.append(
+                    DroponeSessionStats(
+                        session=r.session,
+                        group=r.group,
+                        full_ll_gain=r.full_llhi_by_neuron,
+                        frac_by_feature=rllhi_z_by_feature,
+                        shuf_mean_by_feature=rllhi_shuf_mean,
+                        shuf_std_by_feature=rllhi_shuf_std,
+                        all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    )
+                )
+
+        if rllhi_z_stats:
+            rllhi_z_plot_data = collect_dropone_plot_data(
+                rllhi_z_stats,
+                features=plot_features,
+                min_full_ll_gain=MIN_FULL_LLHI,
+                compute_delta=False,
+                include_missing_cells=INCLUDE_UNFIT_CELLS,
+                include_head_pose=INCLUDE_HEAD_POSE,
+                include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+                head_pose_components=HEAD_POSE_COMPONENTS,
+            )
+            rllhi_z_summary_csv = plot_dropone_suite(
+                WEIGHTS_BASE / "RLLHI_SUMMARY",
+                features=plot_features,
+                plot_data=rllhi_z_plot_data,
+                min_full_ll_gain=MIN_FULL_LLHI,
+                seed=SEED,
+                max_scatter_points=0,
+                ylim_pad_frac=0.08,
+                use_zscore=True,
+                metric_tag="rllhi_z",
+                ylabel="rLLHI (ΔLLHI / LLHI_full)",
+                title_metric="drop-one contribution",
+                summary_metric="dropone_rllhi_z",
+                include_delta_plot=False,
+                use_shuffle_line=True,
+                paired_points=rllhi_z_plot_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
+            )
+            print(f"[OK] rLLHI z-score Summary CSV: {rllhi_z_summary_csv}")
     else:
         print("[WARN] No rLLHI stats available for plotting.")
 
