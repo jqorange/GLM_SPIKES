@@ -15,6 +15,7 @@ from .plotting import (
 )
 from .selection import load_forward_selected_models
 from .stats import build_oof_intercept_mu, hierarchical_bootstrap_mean, poisson_loglik
+from .session_rllr import SessionResult, compute_session_rllr, list_required_sessions
 from .weights import (
     load_feature_names_file,
     load_fold_weights,
@@ -45,6 +46,9 @@ __all__ = [
     "build_oof_intercept_mu",
     "hierarchical_bootstrap_mean",
     "poisson_loglik",
+    "SessionResult",
+    "compute_session_rllr",
+    "list_required_sessions",
     "build_dayid_to_cellinfo",
     "pyramidal_indices_for_session",
     "load_feature_names_file",
