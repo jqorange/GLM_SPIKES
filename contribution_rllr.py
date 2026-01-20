@@ -97,6 +97,14 @@ class SessionResult:
     pyramidal_neurons: np.ndarray
 
 
+def circular_shift(arr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    n = arr.size
+    if n <= 1:
+        return arr
+    shift = int(rng.integers(1, n))
+    return np.roll(arr, shift)
+
+
 def compute_session_rllr(
     session: str,
     dayid2cellinfo: Dict[str, Path],
@@ -393,7 +401,7 @@ def compute_session_rllr(
             shuf_rllr_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
             shuf_llhi_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
             for _ in range(N_SHUFFLE):
-                y_shuf = y[rng.permutation(y.size)]
+                y_shuf = circular_shift(y, rng)
                 if need_rllr_shuffle:
                     mu0_shuf = build_oof_intercept_mu(y_shuf, folds_idx)
                     ll0_shuf = poisson_loglik(y_shuf, mu0_shuf)
