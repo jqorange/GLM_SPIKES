@@ -465,8 +465,6 @@ def compute_session_rllr(
         rows = []
         for v in VARS_ALL:
             for ni, frac in contrib_rllr[v].items():
-                mu = shuf_mean_rllr[v].get(ni, float("nan"))
-                std = shuf_std_rllr[v].get(ni, float("nan"))
                 rows.append(
                     {
                         "session": session,
@@ -474,9 +472,6 @@ def compute_session_rllr(
                         "feature": v,
                         "neuron_idx": ni,
                         "rllr": frac,
-                        "rllr_shuf_mean": mu,
-                        "rllr_shuf_std": std,
-                        "rllr_z": zscore(frac, mu, std),
                     }
                 )
         if not rows:
