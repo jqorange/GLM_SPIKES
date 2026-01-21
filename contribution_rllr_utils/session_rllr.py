@@ -484,9 +484,6 @@ def compute_session_rllr(
                 "feature",
                 "neuron_idx",
                 "rllr",
-                "rllr_shuf_mean",
-                "rllr_shuf_std",
-                "rllr_z",
             ],
         ).to_csv(contrib_csv, index=False)
 
