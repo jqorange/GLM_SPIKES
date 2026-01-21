@@ -29,6 +29,7 @@ class DroponeSessionStats:
     shuf_mean_by_feature: Dict[str, Dict[int, float]]
     shuf_std_by_feature: Dict[str, Dict[int, float]]
     all_neuron_ids: Optional[Sequence[int]] = None
+    unfit_neuron_ids: Optional[Sequence[int]] = None
 
 
 @dataclass
@@ -197,6 +198,7 @@ def load_dropone_session_stats(
         whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
 
     full_ll: Dict[int, float] = {}
+    unfit_neurons: List[int] = []
     for r in full_rows:
         ni = r.get("neuron_idx", r.get("neuron", None))
         dv = r.get("ll_gain", r.get("full_ll_gain", None))
@@ -209,6 +211,8 @@ def load_dropone_session_stats(
         val = _safe_float(dv)
         if np.isfinite(val):
             full_ll[idx] = float(val)
+            if val < 0:
+                unfit_neurons.append(idx)
 
     frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
     shuf_mean: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
@@ -251,10 +255,12 @@ def load_dropone_session_stats(
     return DroponeSessionStats(
         session=session,
         group=group,
-        full_ll_gain=full_ll,
+        full_ll_gain={ni: v for ni, v in full_ll.items() if ni not in unfit_neurons},
         frac_by_feature=frac,
         shuf_mean_by_feature=shuf_mean,
         shuf_std_by_feature=shuf_std,
+        all_neuron_ids=sorted(set(full_ll.keys()) | set(unfit_neurons)),
+        unfit_neuron_ids=sorted(set(unfit_neurons)),
     )
 
 
@@ -263,6 +269,7 @@ def load_dropone_llhi_session_stats(
     features: Iterable[str],
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+    use_zscore: bool = False,
 ) -> Optional[DroponeSessionStats]:
     session = Path(session_dir).name
     group = infer_group(session)
@@ -283,7 +290,22 @@ def load_dropone_llhi_session_stats(
     if feature_neuron_whitelist is not None:
         whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
 
+    unfit_neurons: List[int] = []
     full_llhi: Dict[int, float] = {}
+    full_rllr_csv = stats_dir / "full_rllr_pyr.csv"
+    full_rllr_rows = read_csv_dicts_safe(full_rllr_csv)
+    for r in full_rllr_rows:
+        ni = r.get("neuron_idx", r.get("neuron", None))
+        dv = r.get("ll_gain", r.get("full_ll_gain", None))
+        if ni is None or dv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        val = _safe_float(dv)
+        if np.isfinite(val) and val < 0:
+            unfit_neurons.append(idx)
     for r in full_rows:
         ni = r.get("neuron_idx", r.get("neuron", None))
         dv = r.get("llhi_full", r.get("full_llhi", None))
@@ -306,7 +328,12 @@ def load_dropone_llhi_session_stats(
             continue
         allowed = whitelist.get(feat, None) if whitelist is not None else None
         ni = r.get("neuron_idx", None)
-        fv = r.get("delta_llhi", None)
+        if use_zscore:
+            fv = r.get("delta_llhi_z", None)
+            if fv is None:
+                fv = r.get("delta_llhi", None)
+        else:
+            fv = r.get("delta_llhi", None)
         mu = r.get("delta_llhi_shuf_mean", None)
         std = r.get("delta_llhi_shuf_std", None)
         if ni is None or fv is None:
@@ -316,6 +343,8 @@ def load_dropone_llhi_session_stats(
         except Exception:
             continue
         if allowed is not None and idx not in allowed:
+            continue
+        if idx in unfit_neurons:
             continue
         val = _safe_float(fv)
         if np.isfinite(val):
@@ -333,10 +362,12 @@ def load_dropone_llhi_session_stats(
     return DroponeSessionStats(
         session=session,
         group=group,
-        full_ll_gain=full_llhi,
+        full_ll_gain={ni: v for ni, v in full_llhi.items() if ni not in unfit_neurons},
         frac_by_feature=frac,
         shuf_mean_by_feature=shuf_mean,
         shuf_std_by_feature=shuf_std,
+        all_neuron_ids=sorted(set(full_llhi.keys()) | set(unfit_neurons)),
+        unfit_neuron_ids=sorted(set(unfit_neurons)),
     )
 
 
@@ -345,12 +376,12 @@ def load_dropone_rllhi_session_stats(
     features: Iterable[str],
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
-    use_zscore: bool = False,
 ) -> Optional[DroponeSessionStats]:
     llhi_stats = load_dropone_llhi_session_stats(
         session_dir,
         features,
         feature_neuron_whitelist=feature_neuron_whitelist,
+        use_zscore=False,
     )
     if llhi_stats is None:
         return None
@@ -365,18 +396,7 @@ def load_dropone_rllhi_session_stats(
             if not np.isfinite(full_val) or full_val == 0 or not np.isfinite(delta_val):
                 continue
             rllhi_val = float(delta_val) / float(full_val)
-            mu_delta = llhi_stats.shuf_mean_by_feature.get(feat, {}).get(ni, np.nan)
-            std_delta = llhi_stats.shuf_std_by_feature.get(feat, {}).get(ni, np.nan)
-            if np.isfinite(mu_delta) and np.isfinite(std_delta):
-                rllhi_shuf_mean[feat][ni] = float(mu_delta) / float(full_val)
-                rllhi_shuf_std[feat][ni] = float(std_delta) / float(abs(full_val))
-            if use_zscore:
-                mu = rllhi_shuf_mean[feat].get(ni, np.nan)
-                std = rllhi_shuf_std[feat].get(ni, np.nan)
-                if np.isfinite(mu) and np.isfinite(std) and std > 0:
-                    rllhi_by_feature[feat][ni] = float((rllhi_val - mu) / std)
-            else:
-                rllhi_by_feature[feat][ni] = rllhi_val
+            rllhi_by_feature[feat][ni] = rllhi_val
 
     if all(len(rllhi_by_feature[f]) == 0 for f in feat_list):
         return None
@@ -388,6 +408,7 @@ def load_dropone_rllhi_session_stats(
         frac_by_feature=rllhi_by_feature,
         shuf_mean_by_feature=rllhi_shuf_mean,
         shuf_std_by_feature=rllhi_shuf_std,
+        unfit_neuron_ids=llhi_stats.unfit_neuron_ids,
     )
 
 
@@ -434,19 +455,27 @@ def collect_dropone_plot_data(
         if g not in ("indoor", "outdoor"):
             continue
 
+        unfit_neurons = set(st.unfit_neuron_ids or [])
         if include_missing_cells:
             all_neurons = set(st.all_neuron_ids or [])
             if not all_neurons:
-                all_neurons = set(st.full_ll_gain.keys())
+                all_neurons = set(st.full_ll_gain.keys()) | unfit_neurons
             total_counts[g] += len(all_neurons)
         else:
             all_neurons = set(st.full_ll_gain.keys())
-            for ll_gain in st.full_ll_gain.values():
+            for ni, ll_gain in st.full_ll_gain.items():
+                if ni in unfit_neurons:
+                    continue
                 if np.isfinite(ll_gain):
                     total_counts[g] += 1
 
         eligible = set()
         for ni in all_neurons:
+            if ni in unfit_neurons:
+                if include_missing_cells:
+                    eligible.add(int(ni))
+                    kept_counts[g] += 1
+                continue
             ll_gain = st.full_ll_gain.get(ni, 0.0)
             if not np.isfinite(ll_gain):
                 ll_gain = 0.0
@@ -456,7 +485,11 @@ def collect_dropone_plot_data(
 
         if eligible:
             arr_full = np.asarray(
-                [st.full_ll_gain.get(ni, 0.0) for ni in eligible if np.isfinite(st.full_ll_gain.get(ni, 0.0))],
+                [
+                    0.0 if ni in unfit_neurons else st.full_ll_gain.get(ni, 0.0)
+                    for ni in eligible
+                    if np.isfinite(st.full_ll_gain.get(ni, 0.0)) or ni in unfit_neurons
+                ],
                 dtype=float,
             )
             arr_full = arr_full[np.isfinite(arr_full)]
@@ -485,7 +518,7 @@ def collect_dropone_plot_data(
             vals_shuf95 = []
             for ni in eligible:
                 fracv = m.get(ni, 0.0 if include_missing_cells else np.nan)
-                ll_gain = st.full_ll_gain.get(ni, 0.0)
+                ll_gain = 0.0 if ni in unfit_neurons else st.full_ll_gain.get(ni, 0.0)
                 if np.isfinite(fracv) and np.isfinite(ll_gain):
                     vals_frac.append(float(fracv))
                     if compute_delta:
@@ -775,7 +808,7 @@ def plot_dropone_suite(
 
     if use_zscore:
         ylabel = f"{ylabel} z-score"
-        title_metric = f"{title_metric} z-score"
+        title_metric = f"{title_metric} (z)"
 
     z95 = 1.644854
     if use_zscore and use_shuffle_line:
@@ -805,8 +838,8 @@ def plot_dropone_suite(
         shuffle95_outdoor = None
 
     plot_combined_indoor_outdoor(
-        out_dir / f"BOX_dropone_{metric_tag}_indoor_vs_outdoor{suffix}.png",
-        title=f"{title_metric} (pyramidal; full LL gain ≥ {min_full_ll_gain:g}) | whiskers/caps + jitter",
+        out_dir / f"BOX_{metric_tag}_indoor_outdoor{suffix}.png",
+        title=f"{title_metric} | full ≥ {min_full_ll_gain:g}",
         ylabel=ylabel,
         features=features,
         data_in=plot_data.frac_pooled["indoor"],
@@ -825,8 +858,8 @@ def plot_dropone_suite(
     features_outdoor_sorted = sorted(features, key=lambda f: outdoor_means.get(f, float("-inf")), reverse=True)
 
     plot_single_group_sorted(
-        out_dir / f"BOX_dropone_{metric_tag}_indoor_only_sorted{suffix}.png",
-        title=f"Indoor only (sorted by mean) | {title_metric} | full LL gain ≥ {min_full_ll_gain:g}",
+        out_dir / f"BOX_{metric_tag}_indoor_sorted{suffix}.png",
+        title=f"Indoor | {title_metric}",
         ylabel=ylabel,
         group_label="indoor",
         features_sorted=features_indoor_sorted,
@@ -838,8 +871,8 @@ def plot_dropone_suite(
     )
 
     plot_single_group_sorted(
-        out_dir / f"BOX_dropone_{metric_tag}_outdoor_only_sorted{suffix}.png",
-        title=f"Outdoor only (sorted by mean) | {title_metric} | full LL gain ≥ {min_full_ll_gain:g}",
+        out_dir / f"BOX_{metric_tag}_outdoor_sorted{suffix}.png",
+        title=f"Outdoor | {title_metric}",
         ylabel=ylabel,
         group_label="outdoor",
         features_sorted=features_outdoor_sorted,
@@ -852,8 +885,8 @@ def plot_dropone_suite(
 
     if plot_data.has_full:
         plot_combined_indoor_outdoor(
-            out_dir / f"BOX_full_ll_gain_indoor_vs_outdoor{suffix}.png",
-            title=f"Full LL gain (pyramidal; ≥ {min_full_ll_gain:g}) | whiskers/caps + jitter",
+            out_dir / f"BOX_full_ll_gain_indoor_outdoor{suffix}.png",
+            title=f"Full LL gain | ≥ {min_full_ll_gain:g}",
             ylabel="LL gain (full - intercept)",
             features=["FULL"],
             data_in={"FULL": plot_data.full_pooled["indoor"]["FULL"]},
@@ -865,8 +898,8 @@ def plot_dropone_suite(
 
         if include_delta_plot and not use_zscore:
             plot_combined_indoor_outdoor(
-                out_dir / f"BOX_dropone_delta_ll_indoor_vs_outdoor{suffix}.png",
-                title=f"Drop-one ΔLL (= rLLR×LL gain) (pyramidal; ≥ {min_full_ll_gain:g}) | whiskers/caps + jitter",
+                out_dir / f"BOX_delta_ll_indoor_outdoor{suffix}.png",
+                title="Drop-one ΔLL",
                 ylabel="ΔLL",
                 features=features,
                 data_in=plot_data.delta_pooled["indoor"],
@@ -890,7 +923,7 @@ def plot_dropone_suite(
                 if arr.size == 0:
                     continue
                 w.writerow({
-                    "metric": "dropone_z" if use_zscore else summary_metric,
+                    "metric": summary_metric,
                     "group": grp,
                     "feature": feat,
                     "n": int(arr.size),

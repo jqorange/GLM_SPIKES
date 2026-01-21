@@ -59,6 +59,7 @@ class SessionResult:
     shuf_mean_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
     shuf_std_delta_llhi_by_feature_by_neuron: Dict[str, Dict[int, float]]
     pyramidal_neurons: np.ndarray
+    unfit_neurons: List[int]
 
 
 def list_required_sessions() -> List[str]:
@@ -207,6 +208,7 @@ def compute_session_rllr(
     contrib_llhi_csv = stats_root / "dropone_llhi_pyr.csv"
 
     full_map: Dict[int, float] = {}
+    unfit_neurons: List[int] = []
     contrib: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
     shuf_mean_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
     shuf_std_rllr: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
@@ -257,26 +259,37 @@ def compute_session_rllr(
                     if np.isfinite(std):
                         shuf_std_llhi[feat][ni] = float(std)
 
-    if has_rllr and has_llhi and has_rllr_shuffle and has_llhi_shuffle:
+    if has_rllr and has_llhi and has_llhi_shuffle:
+        unfit_neurons = sorted([ni for ni, val in full_map.items() if np.isfinite(val) and val < 0])
         return SessionResult(
             session=session,
             group=group,
-            full_ll_gain_by_neuron=full_map,
-            contrib_rllr_by_feature_by_neuron=contrib,
+            full_ll_gain_by_neuron={ni: v for ni, v in full_map.items() if ni not in unfit_neurons},
+            contrib_rllr_by_feature_by_neuron={
+                feat: {ni: val for ni, val in vals.items() if ni not in unfit_neurons}
+                for feat, vals in contrib.items()
+            },
             shuf_mean_rllr_by_feature_by_neuron=shuf_mean_rllr,
             shuf_std_rllr_by_feature_by_neuron=shuf_std_rllr,
-            full_llhi_by_neuron=full_llhi_map,
-            contrib_delta_llhi_by_feature_by_neuron=contrib_llhi,
+            full_llhi_by_neuron={ni: v for ni, v in full_llhi_map.items() if ni not in unfit_neurons},
+            contrib_delta_llhi_by_feature_by_neuron={
+                feat: {ni: val for ni, val in vals.items() if ni not in unfit_neurons}
+                for feat, vals in contrib_llhi.items()
+            },
             shuf_mean_delta_llhi_by_feature_by_neuron=shuf_mean_llhi,
             shuf_std_delta_llhi_by_feature_by_neuron=shuf_std_llhi,
             pyramidal_neurons=pyr_idx,
+            unfit_neurons=unfit_neurons,
         )
 
     need_rllr = not has_rllr
     need_llhi = not has_llhi
-    need_rllr_shuffle = not has_rllr_shuffle
+    need_rllr_shuffle = False
     need_llhi_shuffle = not has_llhi_shuffle
 
+    existing_unfit = {ni for ni, val in full_map.items() if np.isfinite(val) and val < 0}
+    if existing_unfit:
+        unfit_neurons.extend(sorted(existing_unfit))
     full_ll_gain_by_neuron: Dict[int, float] = full_map.copy()
     ll_full_by_neuron: Dict[int, float] = {}
     ll0_by_neuron: Dict[int, float] = {}
@@ -305,6 +318,8 @@ def compute_session_rllr(
     dropone_root.mkdir(parents=True, exist_ok=True)
 
     for ni, full_vars in pyr_models.items():
+        if ni in existing_unfit:
+            continue
         y = Y_all[:, ni].astype(np.float64)
         if need_rllr:
             mu0_oof = build_oof_intercept_mu(y, folds_idx)
@@ -333,6 +348,9 @@ def compute_session_rllr(
             ll_full_by_neuron[ni] = float(ll_full)
             ll_gain = float(ll_full - ll0_by_neuron[ni])
             full_ll_gain_by_neuron[ni] = ll_gain
+            if np.isfinite(ll_gain) and ll_gain < 0:
+                unfit_neurons.append(ni)
+                continue
         if need_llhi:
             llhi_full = compute_llhi_bps_poisson(y, mu_oof_full)
             full_llhi_by_neuron[ni] = float(llhi_full)
@@ -370,46 +388,22 @@ def compute_session_rllr(
                 failed_drop_predict += 1
             total_drop_models += 1
 
-        if need_rllr_shuffle or need_llhi_shuffle:
+        if need_llhi_shuffle:
             rng = np.random.default_rng(SEED + int(ni))
-            shuf_rllr_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
             shuf_llhi_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
             for _ in range(n_shuffle):
                 y_shuf = circular_shift(y, rng)
-                if need_rllr_shuffle:
-                    mu0_shuf = build_oof_intercept_mu(y_shuf, folds_idx)
-                    ll0_shuf = poisson_loglik(y_shuf, mu0_shuf)
-                    ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
-                else:
-                    ll0_shuf = np.nan
-                    ll_full_shuf = np.nan
-
                 if need_llhi_shuffle:
                     llhi_full_shuf = compute_llhi_bps_poisson(y_shuf, mu_oof_full)
                 else:
                     llhi_full_shuf = np.nan
 
                 for v, mu_red in mu_oof_red_by_feat.items():
-                    if need_rllr_shuffle:
-                        ll_red_shuf = poisson_loglik(y_shuf, mu_red)
-                        denom = ll_full_shuf - ll0_shuf
-                        if not np.isfinite(denom) or denom <= 0:
-                            rllr_shuf = float("nan")
-                        else:
-                            rllr_shuf = float((ll_full_shuf - ll_red_shuf) / denom)
-                        shuf_rllr_vals[v].append(rllr_shuf)
-
                     if need_llhi_shuffle:
                         llhi_red_shuf = compute_llhi_bps_poisson(y_shuf, mu_red)
                         shuf_llhi_vals[v].append(float(llhi_full_shuf - llhi_red_shuf))
 
             for v in full_vars:
-                if need_rllr_shuffle:
-                    arr = np.asarray(shuf_rllr_vals.get(v, []), dtype=float)
-                    arr = arr[np.isfinite(arr)]
-                    if arr.size:
-                        shuf_mean_rllr[v][ni] = float(np.mean(arr))
-                        shuf_std_rllr[v][ni] = float(np.std(arr))
                 if need_llhi_shuffle:
                     arr = np.asarray(shuf_llhi_vals.get(v, []), dtype=float)
                     arr = arr[np.isfinite(arr)]
@@ -570,16 +564,24 @@ def compute_session_rllr(
         f"failed drop predict={failed_drop_predict}"
     )
 
+    unfit_set = set(unfit_neurons)
     return SessionResult(
         session=session,
         group=group,
-        full_ll_gain_by_neuron=full_ll_gain_by_neuron,
-        contrib_rllr_by_feature_by_neuron=contrib_rllr,
+        full_ll_gain_by_neuron={ni: v for ni, v in full_ll_gain_by_neuron.items() if ni not in unfit_neurons},
+        contrib_rllr_by_feature_by_neuron={
+            feat: {ni: val for ni, val in vals.items() if ni not in unfit_set}
+            for feat, vals in contrib_rllr.items()
+        },
         shuf_mean_rllr_by_feature_by_neuron=shuf_mean_rllr,
         shuf_std_rllr_by_feature_by_neuron=shuf_std_rllr,
-        full_llhi_by_neuron=full_llhi_by_neuron,
-        contrib_delta_llhi_by_feature_by_neuron=contrib_delta_llhi,
+        full_llhi_by_neuron={ni: v for ni, v in full_llhi_by_neuron.items() if ni not in unfit_neurons},
+        contrib_delta_llhi_by_feature_by_neuron={
+            feat: {ni: val for ni, val in vals.items() if ni not in unfit_set}
+            for feat, vals in contrib_delta_llhi.items()
+        },
         shuf_mean_delta_llhi_by_feature_by_neuron=shuf_mean_llhi,
         shuf_std_delta_llhi_by_feature_by_neuron=shuf_std_llhi,
         pyramidal_neurons=pyr_idx,
+        unfit_neurons=sorted(set(unfit_neurons)),
     )
