@@ -523,6 +523,7 @@ def compute_session_rllr(
             ],
         ).to_csv(full_llhi_csv, index=False)
 
+    if need_llhi or need_llhi_shuffle:
         llhi_rows = []
         for v in VARS_ALL:
             for ni, delta in contrib_delta_llhi[v].items():
