@@ -380,9 +380,9 @@ def compute_session_rllr(
                 missing_drop_weights += 1
                 continue
             try:
-                if need_rllr or need_llhi:
-                    mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
-                    mu_oof_red_by_feat[v] = mu_red
+
+                mu_red = predict_oof_from_saved_weights(model_dir_red, X_red, feats_red, folds_idx, ni)
+                mu_oof_red_by_feat[v] = mu_red
             except Exception as exc:
                 print(f"[WARN] {session}: failed loading drop model {mk_red} (neuron_{ni+1}): {exc}")
                 failed_drop_predict += 1
