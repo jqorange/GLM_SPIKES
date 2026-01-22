@@ -13,7 +13,6 @@ from .config import (
     BIN_SEC,
     BIN_SMOOTH_SIGMA_BINS,
     MIN_BIN_OCCUPANCY_SEC,
-    RATE_SMOOTH_SIGMA_BINS,
     SHUFFLE_MIN_SEC,
     SPEED_MAX_M_S,
     SPEED_MIN_M_S,
@@ -161,18 +160,31 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
     if spikes.ndim != 1:
         raise ValueError("speed_score expects 1D spikes array")
 
-    rate = spikes.astype(np.float64) / BIN_SEC
-    sigma_bins = float(RATE_SMOOTH_SIGMA_BINS)
-    if sigma_bins > 0:
-        rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
+    bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
+    bins_sel = bins[mask]
+    spikes_sel = spikes[mask]
 
-    v = head_v.astype(np.float64)
-    ok = mask & np.isfinite(v)
-    if np.sum(ok) < 5:
+    occ = np.bincount(bins_sel, minlength=SPEED_N_BINS).astype(np.float64)
+    spk = np.bincount(bins_sel, weights=spikes_sel, minlength=SPEED_N_BINS).astype(np.float64)
+
+    occ_sec = occ * BIN_SEC
+    valid = occ_sec >= MIN_BIN_OCCUPANCY_SEC
+    if np.sum(valid) < 2:
         return float("nan")
-    if np.std(rate[ok]) == 0 or np.std(v[ok]) == 0:
+
+    p_b = occ_sec[valid] / np.sum(occ_sec[valid])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r_b = spk[valid] / occ_sec[valid]
+    r_bar = float(np.sum(p_b * r_b))
+    if not np.isfinite(r_bar) or r_bar <= 0:
         return float("nan")
-    return float(np.corrcoef(rate[ok], v[ok])[0, 1])
+
+    ratio = r_b / r_bar
+    info_mask = ratio > 0
+    if not np.any(info_mask):
+        return float("nan")
+    info = np.sum(p_b[info_mask] * ratio[info_mask] * np.log2(ratio[info_mask]))
+    return float(info)
 
 
 def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np.ndarray:
