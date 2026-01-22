@@ -10,7 +10,6 @@ from .config import (
     EQUALIZE_POLAR_AREA,
     N_WORKERS,
     OUT_ROOT,
-    REBUILD_PAIRED_POLAR_PLOTS,
     SCORE_PERCENTILES,
     SHUFFLE_N,
 )
@@ -185,7 +184,13 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         )
 
 
-def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: int = SHUFFLE_N) -> Path:
+def process_session(
+    session: str,
+    dayid2cellinfo: dict[str, Path],
+    n_shuffle: int = SHUFFLE_N,
+    *,
+    write_plots: bool = True,
+) -> Path:
     data = load_session_raw(session)
     inputs = TuningInputs(
         head_x=data["head_x"],
@@ -249,12 +254,13 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
 
                 rows.append(row)
 
-                plot_neuron_summary(
-                    session_dir / f"neuron_{n_idx:03d}",
-                    n_idx,
-                    aux,
-                )
-                _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
+                if write_plots:
+                    plot_neuron_summary(
+                        session_dir / f"neuron_{n_idx:03d}",
+                        n_idx,
+                        aux,
+                    )
+                    _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
     else:
         rng = np.random.default_rng(seed=0)
         for n_idx in pyr_idx.tolist():
@@ -290,12 +296,13 @@ def process_session(session: str, dayid2cellinfo: dict[str, Path], n_shuffle: in
 
             rows.append(row)
 
-            plot_neuron_summary(
-                session_dir / f"neuron_{n_idx:03d}",
-                n_idx,
-                aux,
-            )
-            _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
+            if write_plots:
+                plot_neuron_summary(
+                    session_dir / f"neuron_{n_idx:03d}",
+                    n_idx,
+                    aux,
+                )
+                _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
 
     df = pd.DataFrame(rows)
     out_csv = session_dir / "tuning_scores.csv"
@@ -321,22 +328,32 @@ def main():
         else:
             pending.append(session)
     if completed:
-        print(f"[INFO] Skipping {len(completed)} completed sessions.")
+        print(f"[INFO] Rescoring {len(completed)} completed sessions without rewriting plots.")
 
     processed = []
+    rescored = []
     for session in pending:
         try:
-            out_csv = process_session(session, dayid2cellinfo)
+            out_csv = process_session(session, dayid2cellinfo, write_plots=True)
         except Exception as exc:  # pragma: no cover - runtime logging
             print(f"[SKIP] {session}: {exc}")
             continue
         processed.append(session)
         print(f"[DONE] {session}: {out_csv}")
 
-    all_processed = completed + processed
+    for session in completed:
+        try:
+            out_csv = process_session(session, dayid2cellinfo, write_plots=False)
+        except Exception as exc:  # pragma: no cover - runtime logging
+            print(f"[SKIP] {session}: {exc}")
+            continue
+        rescored.append(session)
+        print(f"[DONE] {session}: {out_csv}")
+
+    all_processed = processed + rescored
     _write_lines(OUT_ROOT / "sessions_processed.txt", all_processed)
 
-    pair_sessions = all_processed if REBUILD_PAIRED_POLAR_PLOTS else processed
+    pair_sessions = processed
     pairs = _find_session_pairs(pair_sessions)
     for indoor_session, outdoor_session in pairs:
         indoor_dir = OUT_ROOT / indoor_session
