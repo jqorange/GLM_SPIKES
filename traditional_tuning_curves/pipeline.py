@@ -10,6 +10,7 @@ from .config import (
     EQUALIZE_POLAR_AREA,
     N_WORKERS,
     OUT_ROOT,
+    RESCORE_MODE,
     SCORE_PERCENTILES,
     SHUFFLE_N,
 )
@@ -35,13 +36,15 @@ def _write_lines(path: Path, lines):
 _WORKER_INPUTS: TuningInputs | None = None
 _WORKER_BINS: SessionBinning | None = None
 _WORKER_N_SHUFFLE: int = 0
+_WORKER_DO_SHUFFLE: bool = True
 
 
-def _init_worker(inputs: TuningInputs, bins: SessionBinning, n_shuffle: int) -> None:
-    global _WORKER_INPUTS, _WORKER_BINS, _WORKER_N_SHUFFLE
+def _init_worker(inputs: TuningInputs, bins: SessionBinning, n_shuffle: int, do_shuffle: bool) -> None:
+    global _WORKER_INPUTS, _WORKER_BINS, _WORKER_N_SHUFFLE, _WORKER_DO_SHUFFLE
     _WORKER_INPUTS = inputs
     _WORKER_BINS = bins
     _WORKER_N_SHUFFLE = n_shuffle
+    _WORKER_DO_SHUFFLE = do_shuffle
 
 
 def _process_neuron(args: tuple[int, int]) -> tuple[int, ScoreResult, dict[str, np.ndarray], dict[str, np.ndarray]]:
@@ -50,7 +53,10 @@ def _process_neuron(args: tuple[int, int]) -> tuple[int, ScoreResult, dict[str, 
         raise RuntimeError("Worker not initialized with inputs and bins.")
     rng = np.random.default_rng(seed=seed)
     scores, aux = compute_scores_for_neuron(_WORKER_INPUTS, _WORKER_BINS, neuron_idx)
-    shuffle_scores = compute_shuffle_scores(_WORKER_INPUTS, _WORKER_BINS, neuron_idx, _WORKER_N_SHUFFLE, rng)
+    if _WORKER_DO_SHUFFLE:
+        shuffle_scores = compute_shuffle_scores(_WORKER_INPUTS, _WORKER_BINS, neuron_idx, _WORKER_N_SHUFFLE, rng)
+    else:
+        shuffle_scores = {}
     return neuron_idx, scores, aux, shuffle_scores
 
 
@@ -189,6 +195,7 @@ def process_session(
     dayid2cellinfo: dict[str, Path],
     n_shuffle: int = SHUFFLE_N,
     *,
+    recompute_scores: bool = True,
     write_plots: bool = True,
 ) -> Path:
     data = load_session_raw(session)
@@ -211,7 +218,7 @@ def process_session(
     pyr_idx = pyramidal_indices_for_session(session, dayid2cellinfo, n_neurons)
     if pyr_idx is None or pyr_idx.size == 0:
         raise RuntimeError("pyramidal cell info not found or empty")
-    rows = []
+    rows = [] if recompute_scores else None
     seed_seq = np.random.SeedSequence(0)
     seeds = [int(s.generate_state(1)[0]) for s in seed_seq.spawn(n_neurons)]
 
@@ -220,11 +227,57 @@ def process_session(
         with ProcessPoolExecutor(
             max_workers=N_WORKERS,
             initializer=_init_worker,
-            initargs=(inputs, bins, n_shuffle),
+            initargs=(inputs, bins, n_shuffle, recompute_scores),
         ) as executor:
             results = executor.map(_process_neuron, tasks)
             iterable = results
             for n_idx, scores, aux, shuffle_scores in iterable:
+                if recompute_scores:
+                    thresholds = _score_thresholds(shuffle_scores)
+
+                    row = {
+                        "neuron": n_idx,
+                        "hd_score": scores.hd_score,
+                        "roll_score": scores.roll_score,
+                        "pitch_score": scores.pitch_score,
+                        "speed_score": scores.speed_score,
+                        "speed_stability": scores.speed_stability,
+                        "spatial_stability": scores.spatial_stability,
+                        "angular_stability": scores.angular_stability,
+                        "roll_stability": scores.roll_stability,
+                        "pitch_stability": scores.pitch_stability,
+                        "hd_thresh": thresholds.get("hd_score"),
+                        "roll_thresh": thresholds.get("roll_score"),
+                        "pitch_thresh": thresholds.get("pitch_score"),
+                        "speed_thresh": thresholds.get("speed_score"),
+                        "speed_stab_thresh": thresholds.get("speed_stability"),
+                    }
+
+                    row["is_hd"] = row["hd_score"] > row["hd_thresh"]
+                    row["is_roll"] = row["roll_score"] > row["roll_thresh"]
+                    row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
+                    row["is_speed"] = (
+                        (row["speed_score"] > row["speed_thresh"])
+                        and np.isfinite(row["speed_stability"])
+                        and (row["speed_stability"] >= 0.3)
+                    )
+
+                    rows.append(row)
+
+                if write_plots:
+                    plot_neuron_summary(
+                        session_dir / f"neuron_{n_idx:03d}",
+                        n_idx,
+                        aux,
+                    )
+                    _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
+    else:
+        rng = np.random.default_rng(seed=0)
+        for n_idx in pyr_idx.tolist():
+            scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
+            if recompute_scores:
+                shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
+
                 thresholds = _score_thresholds(shuffle_scores)
 
                 row = {
@@ -256,50 +309,6 @@ def process_session(
 
                 rows.append(row)
 
-                if write_plots:
-                    plot_neuron_summary(
-                        session_dir / f"neuron_{n_idx:03d}",
-                        n_idx,
-                        aux,
-                    )
-                    _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
-    else:
-        rng = np.random.default_rng(seed=0)
-        for n_idx in pyr_idx.tolist():
-            scores, aux = compute_scores_for_neuron(inputs, bins, n_idx)
-            shuffle_scores = compute_shuffle_scores(inputs, bins, n_idx, n_shuffle, rng)
-
-            thresholds = _score_thresholds(shuffle_scores)
-
-            row = {
-                "neuron": n_idx,
-                "hd_score": scores.hd_score,
-                "roll_score": scores.roll_score,
-                "pitch_score": scores.pitch_score,
-                "speed_score": scores.speed_score,
-                "speed_stability": scores.speed_stability,
-                "spatial_stability": scores.spatial_stability,
-                "angular_stability": scores.angular_stability,
-                "roll_stability": scores.roll_stability,
-                "pitch_stability": scores.pitch_stability,
-                "hd_thresh": thresholds.get("hd_score"),
-                "roll_thresh": thresholds.get("roll_score"),
-                "pitch_thresh": thresholds.get("pitch_score"),
-                "speed_thresh": thresholds.get("speed_score"),
-                "speed_stab_thresh": thresholds.get("speed_stability"),
-            }
-
-            row["is_hd"] = row["hd_score"] > row["hd_thresh"]
-            row["is_roll"] = row["roll_score"] > row["roll_thresh"]
-            row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
-            row["is_speed"] = (
-                (row["speed_score"] > row["speed_thresh"])
-                and np.isfinite(row["speed_stability"])
-                and (row["speed_stability"] >= 0.3)
-            )
-
-            rows.append(row)
-
             if write_plots:
                 plot_neuron_summary(
                     session_dir / f"neuron_{n_idx:03d}",
@@ -308,9 +317,10 @@ def process_session(
                 )
                 _save_polar_curves(session_dir / f"neuron_{n_idx:03d}", aux)
 
-    df = pd.DataFrame(rows)
     out_csv = session_dir / "tuning_scores.csv"
-    df.to_csv(out_csv, index=False)
+    if recompute_scores:
+        df = pd.DataFrame(rows)
+        df.to_csv(out_csv, index=False)
     return out_csv
 
 
@@ -332,7 +342,13 @@ def main():
         else:
             pending.append(session)
     if completed:
-        print(f"[INFO] Rescoring {len(completed)} completed sessions without rewriting plots.")
+        if RESCORE_MODE == "scores":
+            action = "scores only"
+        elif RESCORE_MODE == "plots":
+            action = "plots only"
+        else:
+            action = "scores and plots"
+        print(f"[INFO] Reprocessing {len(completed)} completed sessions ({action}).")
 
     processed = []
     rescored = []
@@ -347,7 +363,16 @@ def main():
 
     for session in completed:
         try:
-            out_csv = process_session(session, dayid2cellinfo, write_plots=False)
+            if RESCORE_MODE not in {"scores", "plots", "both"}:
+                raise ValueError(f"Unknown RESCORE_MODE={RESCORE_MODE!r} (expected scores|plots|both).")
+            recompute_scores = RESCORE_MODE in {"scores", "both"}
+            write_plots = RESCORE_MODE in {"plots", "both"}
+            out_csv = process_session(
+                session,
+                dayid2cellinfo,
+                recompute_scores=recompute_scores,
+                write_plots=write_plots,
+            )
         except Exception as exc:  # pragma: no cover - runtime logging
             print(f"[SKIP] {session}: {exc}")
             continue
