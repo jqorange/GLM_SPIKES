@@ -187,7 +187,9 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
     return float(info)
 
 
-def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def _speed_tuning_with_valid(
+    head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
     bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
     bins_sel = bins[mask]
     spikes_sel = spikes[mask]
@@ -204,6 +206,11 @@ def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np
     sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="nearest")
+    return rate, valid
+
+
+def speed_tuning(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    rate, _ = _speed_tuning_with_valid(head_v, spikes, mask)
     return rate
 
 
@@ -211,22 +218,27 @@ def speed_stability(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) ->
     n = len(head_v)
     quarters = np.array_split(np.arange(n), 4)
     curves = []
+    valid_masks = []
     for idx in quarters:
         qmask = mask.copy()
         qmask[:] = False
         qmask[idx] = mask[idx]
-        curves.append(speed_tuning(head_v, spikes, qmask))
+        curve, valid = _speed_tuning_with_valid(head_v, spikes, qmask)
+        if np.sum(valid) < 2:
+            return float("nan")
+        curves.append(curve)
+        valid_masks.append(valid)
 
     corrs = []
     for i in range(len(curves)):
         for j in range(i + 1, len(curves)):
             a = curves[i]
             b = curves[j]
-            ok = np.isfinite(a) & np.isfinite(b)
+            ok = valid_masks[i] & valid_masks[j]
             if np.sum(ok) < 2:
-                continue
+                return float("nan")
             if np.std(a[ok]) == 0 or np.std(b[ok]) == 0:
-                continue
+                return float("nan")
             corrs.append(np.corrcoef(a[ok], b[ok])[0, 1])
 
     if not corrs:
