@@ -248,8 +248,10 @@ def process_session(
                 row["is_hd"] = row["hd_score"] > row["hd_thresh"]
                 row["is_roll"] = row["roll_score"] > row["roll_thresh"]
                 row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
-                row["is_speed"] = (row["speed_score"] > row["speed_thresh"]) and (
-                    row["speed_stability"] > row["speed_stab_thresh"]
+                row["is_speed"] = (
+                    (row["speed_score"] > row["speed_thresh"])
+                    and np.isfinite(row["speed_stability"])
+                    and (row["speed_stability"] >= 0.3)
                 )
 
                 rows.append(row)
@@ -290,8 +292,10 @@ def process_session(
             row["is_hd"] = row["hd_score"] > row["hd_thresh"]
             row["is_roll"] = row["roll_score"] > row["roll_thresh"]
             row["is_pitch"] = row["pitch_score"] > row["pitch_thresh"]
-            row["is_speed"] = (row["speed_score"] > row["speed_thresh"]) and (
-                row["speed_stability"] > row["speed_stab_thresh"]
+            row["is_speed"] = (
+                (row["speed_score"] > row["speed_thresh"])
+                and np.isfinite(row["speed_stability"])
+                and (row["speed_stability"] >= 0.3)
             )
 
             rows.append(row)
