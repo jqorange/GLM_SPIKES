@@ -242,10 +242,6 @@ def process_session(
                         "pitch_score": scores.pitch_score,
                         "speed_score": scores.speed_score,
                         "speed_stability": scores.speed_stability,
-                        "spatial_stability": scores.spatial_stability,
-                        "angular_stability": scores.angular_stability,
-                        "roll_stability": scores.roll_stability,
-                        "pitch_stability": scores.pitch_stability,
                         "hd_thresh": thresholds.get("hd_score"),
                         "roll_thresh": thresholds.get("roll_score"),
                         "pitch_thresh": thresholds.get("pitch_score"),
@@ -259,7 +255,7 @@ def process_session(
                     row["is_speed"] = (
                         (row["speed_score"] > row["speed_thresh"])
                         and np.isfinite(row["speed_stability"])
-                        and (row["speed_stability"] >= 0.3)
+                        and (row["speed_stability"] > row["speed_stab_thresh"])
                     )
 
                     rows.append(row)
@@ -287,10 +283,6 @@ def process_session(
                     "pitch_score": scores.pitch_score,
                     "speed_score": scores.speed_score,
                     "speed_stability": scores.speed_stability,
-                    "spatial_stability": scores.spatial_stability,
-                    "angular_stability": scores.angular_stability,
-                    "roll_stability": scores.roll_stability,
-                    "pitch_stability": scores.pitch_stability,
                     "hd_thresh": thresholds.get("hd_score"),
                     "roll_thresh": thresholds.get("roll_score"),
                     "pitch_thresh": thresholds.get("pitch_score"),
@@ -304,7 +296,7 @@ def process_session(
                 row["is_speed"] = (
                     (row["speed_score"] > row["speed_thresh"])
                     and np.isfinite(row["speed_stability"])
-                    and (row["speed_stability"] >= 0.3)
+                    and (row["speed_stability"] > row["speed_stab_thresh"])
                 )
 
                 rows.append(row)

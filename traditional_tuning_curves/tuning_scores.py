@@ -6,9 +6,10 @@ from typing import Dict, Tuple
 import numpy as np
 from scipy import ndimage
 
-from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
+from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 from glm_poisson_forward.design_matrix import bin_col
 from .config import (
+    ANGLE_N_BINS,
     ANGULAR_K_MAX,
     BIN_SEC,
     BIN_SMOOTH_SIGMA_BINS,
@@ -51,10 +52,6 @@ class ScoreResult:
     pitch_score: float
     speed_score: float
     speed_stability: float
-    spatial_stability: float
-    angular_stability: float
-    roll_stability: float
-    pitch_stability: float
 
 
 def build_bins(inputs: TuningInputs) -> SessionBinning:
@@ -88,37 +85,6 @@ def build_bins(inputs: TuningInputs) -> SessionBinning:
 
 def valid_speed_mask(head_v: np.ndarray) -> np.ndarray:
     return (head_v >= SPEED_MIN_M_S) & (head_v <= SPEED_MAX_M_S)
-
-
-def _bincount_2d(x_bin, y_bin, x_min, y_min, x_size, y_size, weights=None) -> np.ndarray:
-    idx = (y_bin - y_min) * x_size + (x_bin - x_min)
-    flat = np.bincount(idx, weights=weights, minlength=x_size * y_size)
-    return flat.reshape(y_size, x_size)
-
-
-def rate_map_2d(
-    x_bin: np.ndarray,
-    y_bin: np.ndarray,
-    spikes: np.ndarray,
-    mask: np.ndarray,
-    x_min: int,
-    y_min: int,
-    x_size: int,
-    y_size: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    x_sel = x_bin[mask]
-    y_sel = y_bin[mask]
-    spikes_sel = spikes[mask]
-
-    occupancy = _bincount_2d(x_sel, y_sel, x_min, y_min, x_size, y_size)
-    spike_map = _bincount_2d(x_sel, y_sel, x_min, y_min, x_size, y_size, weights=spikes_sel)
-
-    occupancy_sec = occupancy * BIN_SEC
-    rate_map = np.full_like(occupancy_sec, np.nan, dtype=np.float64)
-    valid = occupancy_sec >= MIN_BIN_OCCUPANCY_SEC
-    with np.errstate(invalid="ignore", divide="ignore"):
-        rate_map[valid] = spike_map[valid] / occupancy_sec[valid]
-    return rate_map, occupancy_sec
 
 
 def _vector_length_k(weights: np.ndarray, angles: np.ndarray, k: int) -> float:
@@ -246,89 +212,17 @@ def speed_stability(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) ->
     return float(np.mean(corrs))
 
 
-def spatial_stability(
-    x_bin: np.ndarray,
-    y_bin: np.ndarray,
-    spikes: np.ndarray,
-    mask: np.ndarray,
-    x_min: int,
-    y_min: int,
-    x_size: int,
-    y_size: int,
-) -> float:
-    n = len(spikes)
-    mid = n // 2
-    mask1 = mask.copy()
-    mask2 = mask.copy()
-    mask1[mid:] = False
-    mask2[:mid] = False
-
-    rm1, _ = rate_map_2d(x_bin, y_bin, spikes, mask1, x_min, y_min, x_size, y_size)
-    rm2, _ = rate_map_2d(x_bin, y_bin, spikes, mask2, x_min, y_min, x_size, y_size)
-
-    ok = np.isfinite(rm1) & np.isfinite(rm2)
-    if np.sum(ok) < 5:
-        return float("nan")
-    if np.std(rm1[ok]) == 0 or np.std(rm2[ok]) == 0:
-        return float("nan")
-    return float(np.corrcoef(rm1[ok], rm2[ok])[0, 1])
-
-
-def angular_stability(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> float:
-    n = len(spikes)
-    mid = n // 2
-    mask1 = mask.copy()
-    mask2 = mask.copy()
-    mask1[mid:] = False
-    mask2[:mid] = False
-
-    _, curve1 = angular_score(angle_bin, spikes, mask1)
-    _, curve2 = angular_score(angle_bin, spikes, mask2)
-
-    ok = np.isfinite(curve1) & np.isfinite(curve2)
-    if np.sum(ok) < 2:
-        return float("nan")
-    if np.std(curve1[ok]) == 0 or np.std(curve2[ok]) == 0:
-        return float("nan")
-    return float(np.corrcoef(curve1[ok], curve2[ok])[0, 1])
-
-
 def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron_idx: int) -> Tuple[ScoreResult, Dict[str, np.ndarray]]:
     spikes = inputs.spikes[:, neuron_idx].astype(np.float64)
     mask = valid_speed_mask(inputs.head_v)
-
-    rate_map, _ = rate_map_2d(
-        bins.x_bin,
-        bins.y_bin,
-        spikes,
-        mask,
-        bins.x_min,
-        bins.y_min,
-        bins.x_size,
-        bins.y_size,
-    )
 
     hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask)
     roll_score, roll_curve = angular_score(bins.roll_bin, spikes, mask)
     pitch_score, pitch_curve = angular_score(bins.pitch_bin, spikes, mask)
     s_score = speed_score(inputs.head_v, spikes, mask)
     s_stability = speed_stability(inputs.head_v, spikes, mask)
-    spat_stab = spatial_stability(
-        bins.x_bin,
-        bins.y_bin,
-        spikes,
-        mask,
-        bins.x_min,
-        bins.y_min,
-        bins.x_size,
-        bins.y_size,
-    )
-    ang_stab = angular_stability(bins.hd_bin, spikes, mask)
-    roll_stab = angular_stability(bins.roll_bin, spikes, mask)
-    pitch_stab = angular_stability(bins.pitch_bin, spikes, mask)
 
     aux = {
-        "rate_map": rate_map,
         "hd_curve": hd_curve,
         "roll_curve": roll_curve,
         "pitch_curve": pitch_curve,
@@ -342,10 +236,6 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
             pitch_score=pitch_score,
             speed_score=s_score,
             speed_stability=s_stability,
-            spatial_stability=spat_stab,
-            angular_stability=ang_stab,
-            roll_stability=roll_stab,
-            pitch_stability=pitch_stab,
         ),
         aux,
     )
