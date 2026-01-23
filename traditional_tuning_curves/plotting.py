@@ -6,18 +6,9 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 
-from glm_poisson_forward.config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
+from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 
-from .config import SPEED_MAX_M_S, SPEED_MIN_M_S
-
-
-def _plot_rate_map(ax, rate_map: np.ndarray) -> None:
-    display_map = np.nan_to_num(rate_map, nan=0.0)
-    im = ax.imshow(display_map, origin="lower", cmap="viridis", vmin=0.0)
-    ax.set_title("Spatial rate map (Hz)")
-    ax.set_xlabel("X bin")
-    ax.set_ylabel("Y bin")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+from .config import ANGLE_N_BINS, SPEED_MAX_M_S, SPEED_MIN_M_S
 
 
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
@@ -48,16 +39,6 @@ def plot_polar_curve(out_path: Path, theta_deg: np.ndarray, r: np.ndarray, title
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=200)
     plt.close()
-
-
-def _plot_single_rate_map(out_path: Path, rate_map: np.ndarray, title: str) -> None:
-    fig, ax = plt.subplots(figsize=(6.0, 5.0))
-    _plot_rate_map(ax, rate_map)
-    ax.set_title(title)
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
 
 
 def _plot_single_speed(out_path: Path, speed_curve: np.ndarray, title: str) -> None:
@@ -105,11 +86,6 @@ def plot_neuron_summary(
 ) -> None:
     theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
     title_bits = f"Neuron {neuron_idx}"
-    _plot_single_rate_map(
-        out_dir / "position.png",
-        aux["rate_map"],
-        title_bits,
-    )
     _plot_single_speed(
         out_dir / "speed.png",
         aux["speed_curve"],
@@ -190,7 +166,7 @@ def binning_note(out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(
-            "Traditional tuning curves use the same binning rules as the GLM:\n"
+            "Traditional tuning curves use these binning rules:\n"
             f"- Position bins: {POSITION_CELL_CM:.1f} cm square\n"
             f"- Speed bins: {SPEED_N_BINS} bins on [0, 1.5] m/s\n"
             f"- Angle bins (roll/yaw/pitch): {ANGLE_N_BINS} bins on [0, 2π) rad\n"
