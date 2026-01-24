@@ -10,7 +10,7 @@ Drop-one contribution plotting (pyramidal-only) with:
     final model includes that feature (still pyramidal only).
   - Filter: only neurons with full LL gain/LLHI >= threshold enter downstream analysis
   - Plots rLLR, ΔLLHI, and rLLHI in one run.
-  - By default, uses shuffle-normalized z-scores only for ΔLLHI (use --use_raw to plot raw ΔLLHI).
+  - By default, uses shuffle-normalized z-scores for rLLR and ΔLLHI (use --use_raw to plot raw ΔLLHI).
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
 Inputs per session:
@@ -126,7 +126,7 @@ def main():
                     sess_dir,
                     features=features,
                     feature_neuron_whitelist=whitelist,
-                    use_zscore=False,
+                    use_zscore=True,
                 )
             elif metric == "delta_llhi":
                 st = load_dropone_llhi_session_stats_rllr(
@@ -176,13 +176,13 @@ def main():
                 seed=args.seed,
                 max_scatter_points=args.max_scatter_points,
                 ylim_pad_frac=args.ylim_pad_frac,
-                use_zscore=False,
-                metric_tag="rllr",
+                use_zscore=True,
+                metric_tag="rllr_z",
                 ylabel="rLLR",
                 title_metric="drop-one rLLR",
-                summary_metric="dropone_rllr",
+                summary_metric="dropone_rllr_z",
                 include_delta_plot=True,
-                use_shuffle_line=False,
+                use_shuffle_line=True,
             )
             filter_label = f"full LL gain ≥ {args.min_full_ll_gain:g}"
         elif metric == "delta_llhi":

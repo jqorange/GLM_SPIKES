@@ -105,7 +105,7 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
         title_metric="drop-one rLLR",
         summary_metric="dropone_rllr",
         include_delta_plot=True,
-        use_shuffle_line=False,
+        use_shuffle_line=True,
         paired_points=dropone_plot_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
     )
     print(
@@ -114,6 +114,61 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
         f"outdoor {dropone_plot_data.kept_counts['outdoor']}/{dropone_plot_data.total_counts['outdoor']}",
     )
     print(f"[OK] Summary CSV: {summary_csv}")
+
+    rllr_z_stats = []
+    for r in results:
+        z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
+        for feat in VARS_ALL:
+            for ni, val in r.contrib_rllr_by_feature_by_neuron.get(feat, {}).items():
+                mu = r.shuf_mean_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                std = r.shuf_std_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
+                if np.isfinite(val) and np.isfinite(mu) and np.isfinite(std) and std > MU_EPS:
+                    z_by_feature[feat][ni] = float((val - mu) / std)
+        if any(z_by_feature.values()):
+            rllr_z_stats.append(
+                DroponeSessionStats(
+                    session=r.session,
+                    group=r.group,
+                    full_ll_gain=r.full_ll_gain_by_neuron,
+                    frac_by_feature=z_by_feature,
+                    shuf_mean_by_feature=r.shuf_mean_rllr_by_feature_by_neuron,
+                    shuf_std_by_feature=r.shuf_std_rllr_by_feature_by_neuron,
+                    all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    unfit_neuron_ids=r.unfit_neurons,
+                )
+            )
+
+    if not rllr_z_stats:
+        return
+
+    rllr_z_plot_data = collect_dropone_plot_data(
+        rllr_z_stats,
+        features=plot_features,
+        min_full_ll_gain=MIN_FULL_LL_GAIN,
+        compute_delta=True,
+        include_missing_cells=INCLUDE_UNFIT_CELLS,
+        include_head_pose=INCLUDE_HEAD_POSE,
+        include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
+        head_pose_components=HEAD_POSE_COMPONENTS,
+    )
+    rllr_z_summary_csv = plot_dropone_suite(
+        WEIGHTS_BASE / "RLLR_SUMMARY",
+        features=plot_features,
+        plot_data=rllr_z_plot_data,
+        min_full_ll_gain=MIN_FULL_LL_GAIN,
+        seed=SEED,
+        max_scatter_points=0,
+        ylim_pad_frac=0.08,
+        use_zscore=True,
+        metric_tag="rllr_z",
+        ylabel="rLLR",
+        title_metric="drop-one rLLR",
+        summary_metric="dropone_rllr_z",
+        include_delta_plot=True,
+        use_shuffle_line=True,
+        paired_points=rllr_z_plot_data.paired_points if LINK_INDOOR_OUTDOOR_PAIRS else None,
+    )
+    print(f"[OK] rLLR z-score Summary CSV: {rllr_z_summary_csv}")
 
 def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> None:
     llhi_stats = [
