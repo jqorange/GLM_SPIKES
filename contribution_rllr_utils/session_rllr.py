@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -78,6 +79,61 @@ def circular_shift(arr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return np.roll(arr, shift)
 
 
+def zscore(value: float, mu: float, sigma: float) -> float:
+    if not (np.isfinite(value) and np.isfinite(mu) and np.isfinite(sigma)):
+        return float("nan")
+    if sigma <= MU_EPS:
+        return float("nan")
+    return float((value - mu) / sigma)
+
+
+def right_tail_pvalue(z_val: float) -> float:
+    if not np.isfinite(z_val):
+        return float("nan")
+    return float(0.5 * math.erfc(float(z_val) / math.sqrt(2.0)))
+
+
+def ensure_z_pvalue_columns(
+    csv_path: Path,
+    *,
+    value_col: str,
+    mean_col: str,
+    std_col: str,
+    z_col: str,
+    p_col: str,
+) -> bool:
+    if (not csv_path.exists()) or csv_path.stat().st_size < 1:
+        return False
+    df = pd.read_csv(csv_path)
+    if value_col not in df.columns:
+        return False
+    if mean_col not in df.columns or std_col not in df.columns:
+        return False
+    updated = False
+    if z_col not in df.columns:
+        df[z_col] = np.nan
+        updated = True
+    if p_col not in df.columns:
+        df[p_col] = np.nan
+        updated = True
+
+    needs_z = df[z_col].isna()
+    if needs_z.any():
+        z_vals = (df[value_col] - df[mean_col]) / df[std_col]
+        z_vals = z_vals.where(df[std_col] > MU_EPS)
+        df.loc[needs_z, z_col] = z_vals[needs_z]
+        updated = True
+
+    needs_p = df[p_col].isna()
+    if needs_p.any():
+        df.loc[needs_p, p_col] = df.loc[needs_p, z_col].apply(right_tail_pvalue)
+        updated = True
+
+    if updated:
+        df.to_csv(csv_path, index=False)
+    return updated
+
+
 def compute_session_rllr(
     session: str,
     dayid2cellinfo: Dict[str, Path],
@@ -85,12 +141,6 @@ def compute_session_rllr(
     n_jobs: int = N_JOBS,
     n_shuffle: int = 200,
 ) -> Optional[SessionResult]:
-    def zscore(value: float, mu: float, sigma: float) -> float:
-        if not (np.isfinite(value) and np.isfinite(mu) and np.isfinite(sigma)):
-            return float("nan")
-        if sigma <= MU_EPS:
-            return float("nan")
-        return float((value - mu) / sigma)
 
     sess_dir = WEIGHTS_BASE / session
     sess_dir.mkdir(parents=True, exist_ok=True)
@@ -219,11 +269,15 @@ def compute_session_rllr(
 
     has_rllr = False
     has_rllr_shuffle = False
+    has_rllr_z = False
+    has_rllr_pvalue = False
     if full_csv.exists() and contrib_csv.exists():
         df_full = pd.read_csv(full_csv)
         df_con = pd.read_csv(contrib_csv)
         has_rllr = ("ll_gain" in df_full.columns) and ("rllr" in df_con.columns)
         has_rllr_shuffle = ("rllr_shuf_mean" in df_con.columns) and ("rllr_shuf_std" in df_con.columns)
+        has_rllr_z = "rllr_z" in df_con.columns
+        has_rllr_pvalue = "rllr_pvalue" in df_con.columns
         if has_rllr:
             full_map = {int(r["neuron_idx"]): float(r["ll_gain"]) for _, r in df_full.iterrows()}
             for _, r in df_con.iterrows():
@@ -240,11 +294,15 @@ def compute_session_rllr(
 
     has_llhi = False
     has_llhi_shuffle = False
+    has_llhi_z = False
+    has_llhi_pvalue = False
     if full_llhi_csv.exists() and contrib_llhi_csv.exists():
         df_full_llhi = pd.read_csv(full_llhi_csv)
         df_con_llhi = pd.read_csv(contrib_llhi_csv)
         has_llhi = ("llhi_full" in df_full_llhi.columns) and ("delta_llhi" in df_con_llhi.columns)
         has_llhi_shuffle = ("delta_llhi_shuf_mean" in df_con_llhi.columns) and ("delta_llhi_shuf_std" in df_con_llhi.columns)
+        has_llhi_z = "delta_llhi_z" in df_con_llhi.columns
+        has_llhi_pvalue = "delta_llhi_pvalue" in df_con_llhi.columns
         if has_llhi:
             full_llhi_map = {int(r["neuron_idx"]): float(r["llhi_full"]) for _, r in df_full_llhi.iterrows()}
             for _, r in df_con_llhi.iterrows():
@@ -259,7 +317,33 @@ def compute_session_rllr(
                     if np.isfinite(std):
                         shuf_std_llhi[feat][ni] = float(std)
 
-    if has_rllr and has_llhi and has_llhi_shuffle:
+    if has_rllr and has_rllr_shuffle:
+        if ensure_z_pvalue_columns(
+            contrib_csv,
+            value_col="rllr",
+            mean_col="rllr_shuf_mean",
+            std_col="rllr_shuf_std",
+            z_col="rllr_z",
+            p_col="rllr_pvalue",
+        ):
+            df_con = pd.read_csv(contrib_csv)
+            has_rllr_z = "rllr_z" in df_con.columns
+            has_rllr_pvalue = "rllr_pvalue" in df_con.columns
+
+    if has_llhi and has_llhi_shuffle:
+        if ensure_z_pvalue_columns(
+            contrib_llhi_csv,
+            value_col="delta_llhi",
+            mean_col="delta_llhi_shuf_mean",
+            std_col="delta_llhi_shuf_std",
+            z_col="delta_llhi_z",
+            p_col="delta_llhi_pvalue",
+        ):
+            df_con_llhi = pd.read_csv(contrib_llhi_csv)
+            has_llhi_z = "delta_llhi_z" in df_con_llhi.columns
+            has_llhi_pvalue = "delta_llhi_pvalue" in df_con_llhi.columns
+
+    if has_rllr and has_llhi and has_llhi_shuffle and has_rllr_shuffle and has_rllr_z and has_rllr_pvalue and has_llhi_z and has_llhi_pvalue:
         unfit_neurons = sorted([ni for ni, val in full_map.items() if np.isfinite(val) and val < 0])
         return SessionResult(
             session=session,
@@ -284,7 +368,7 @@ def compute_session_rllr(
 
     need_rllr = not has_rllr
     need_llhi = not has_llhi
-    need_rllr_shuffle = False
+    need_rllr_shuffle = not has_rllr_shuffle
     need_llhi_shuffle = not has_llhi_shuffle
 
     existing_unfit = {ni for ni, val in full_map.items() if np.isfinite(val) and val < 0}
@@ -321,10 +405,12 @@ def compute_session_rllr(
         if ni in existing_unfit:
             continue
         y = Y_all[:, ni].astype(np.float64)
-        if need_rllr:
+        mu0_oof = None
+        if need_rllr or need_rllr_shuffle:
             mu0_oof = build_oof_intercept_mu(y, folds_idx)
-            ll0 = poisson_loglik(y, mu0_oof)
-            ll0_by_neuron[ni] = float(ll0)
+            if need_rllr:
+                ll0 = poisson_loglik(y, mu0_oof)
+                ll0_by_neuron[ni] = float(ll0)
 
         X_full, feats_full, mk_full = get_X(full_vars)
         model_dir_full = find_saved_model_dir(mk_full)
@@ -388,20 +474,31 @@ def compute_session_rllr(
                 failed_drop_predict += 1
             total_drop_models += 1
 
-        if need_llhi_shuffle:
+        if need_llhi_shuffle or need_rllr_shuffle:
             rng = np.random.default_rng(SEED + int(ni))
             shuf_llhi_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
+            shuf_rllr_vals: Dict[str, List[float]] = {v: [] for v in full_vars}
             for _ in range(n_shuffle):
                 y_shuf = circular_shift(y, rng)
+                llhi_full_shuf = np.nan
+                ll0_shuf = np.nan
+                ll_full_shuf = np.nan
+                denom_shuf = np.nan
                 if need_llhi_shuffle:
                     llhi_full_shuf = compute_llhi_bps_poisson(y_shuf, mu_oof_full)
-                else:
-                    llhi_full_shuf = np.nan
+                if need_rllr_shuffle and mu0_oof is not None:
+                    ll0_shuf = poisson_loglik(y_shuf, mu0_oof)
+                    ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
+                    denom_shuf = ll_full_shuf - ll0_shuf
 
                 for v, mu_red in mu_oof_red_by_feat.items():
                     if need_llhi_shuffle:
                         llhi_red_shuf = compute_llhi_bps_poisson(y_shuf, mu_red)
                         shuf_llhi_vals[v].append(float(llhi_full_shuf - llhi_red_shuf))
+                    if need_rllr_shuffle and np.isfinite(denom_shuf) and denom_shuf > MU_EPS:
+                        ll_red_shuf = poisson_loglik(y_shuf, mu_red)
+                        if np.isfinite(ll_red_shuf) and np.isfinite(ll_full_shuf):
+                            shuf_rllr_vals[v].append(float((ll_full_shuf - ll_red_shuf) / denom_shuf))
 
             for v in full_vars:
                 if need_llhi_shuffle:
@@ -410,6 +507,12 @@ def compute_session_rllr(
                     if arr.size:
                         shuf_mean_llhi[v][ni] = float(np.mean(arr))
                         shuf_std_llhi[v][ni] = float(np.std(arr))
+                if need_rllr_shuffle:
+                    arr = np.asarray(shuf_rllr_vals.get(v, []), dtype=float)
+                    arr = arr[np.isfinite(arr)]
+                    if arr.size:
+                        shuf_mean_rllr[v][ni] = float(np.mean(arr))
+                        shuf_std_rllr[v][ni] = float(np.std(arr))
 
         for v in full_vars:
             if v not in mu_oof_red_by_feat:
@@ -435,6 +538,7 @@ def compute_session_rllr(
                 else:
                     contrib_delta_llhi[v][ni] = float(llhi_full - llhi_red)
 
+    need_rllr_zp = not (has_rllr_z and has_rllr_pvalue)
     if need_rllr:
         df_full_rows = [
             {
@@ -462,9 +566,13 @@ def compute_session_rllr(
         )
         df_full.to_csv(full_csv, index=False)
 
+    if need_rllr or need_rllr_shuffle or need_rllr_zp:
         rows = []
         for v in VARS_ALL:
             for ni, frac in contrib_rllr[v].items():
+                mu = shuf_mean_rllr[v].get(ni, float("nan"))
+                std = shuf_std_rllr[v].get(ni, float("nan"))
+                rllr_z = zscore(frac, mu, std)
                 rows.append(
                     {
                         "session": session,
@@ -472,6 +580,10 @@ def compute_session_rllr(
                         "feature": v,
                         "neuron_idx": ni,
                         "rllr": frac,
+                        "rllr_shuf_mean": mu,
+                        "rllr_shuf_std": std,
+                        "rllr_z": rllr_z,
+                        "rllr_pvalue": right_tail_pvalue(rllr_z),
                     }
                 )
         if not rows:
@@ -484,6 +596,10 @@ def compute_session_rllr(
                 "feature",
                 "neuron_idx",
                 "rllr",
+                "rllr_shuf_mean",
+                "rllr_shuf_std",
+                "rllr_z",
+                "rllr_pvalue",
             ],
         ).to_csv(contrib_csv, index=False)
 
@@ -509,12 +625,14 @@ def compute_session_rllr(
             ],
         ).to_csv(full_llhi_csv, index=False)
 
-    if need_llhi or need_llhi_shuffle:
+    need_llhi_pvalue = not has_llhi_pvalue
+    if need_llhi or need_llhi_shuffle or need_llhi_pvalue:
         llhi_rows = []
         for v in VARS_ALL:
             for ni, delta in contrib_delta_llhi[v].items():
                 mu = shuf_mean_llhi[v].get(ni, float("nan"))
                 std = shuf_std_llhi[v].get(ni, float("nan"))
+                delta_z = zscore(delta, mu, std)
                 llhi_rows.append(
                     {
                         "session": session,
@@ -524,7 +642,8 @@ def compute_session_rllr(
                         "delta_llhi": delta,
                         "delta_llhi_shuf_mean": mu,
                         "delta_llhi_shuf_std": std,
-                        "delta_llhi_z": zscore(delta, mu, std),
+                        "delta_llhi_z": delta_z,
+                        "delta_llhi_pvalue": right_tail_pvalue(delta_z),
                     }
                 )
         if not llhi_rows:
@@ -540,6 +659,7 @@ def compute_session_rllr(
                 "delta_llhi_shuf_mean",
                 "delta_llhi_shuf_std",
                 "delta_llhi_z",
+                "delta_llhi_pvalue",
             ],
         ).to_csv(contrib_llhi_csv, index=False)
 
