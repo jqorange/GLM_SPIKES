@@ -172,6 +172,7 @@ def main():
                 compute_delta=True,
                 include_missing_cells=args.include_unfit_cells,
                 paired_fit_only=args.paired_fit_only,
+                include_paired_points=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )
@@ -190,6 +191,7 @@ def main():
                 summary_metric="dropone_rllr_z",
                 include_delta_plot=True,
                 use_shuffle_line=True,
+                paired_points=plot_data.paired_points if args.paired_fit_only else None,
             )
             filter_label = f"full LL gain ≥ {args.min_full_ll_gain:g}"
         elif metric == "delta_llhi":
@@ -201,6 +203,7 @@ def main():
                 compute_delta=False,
                 include_missing_cells=args.include_unfit_cells,
                 paired_fit_only=args.paired_fit_only,
+                include_paired_points=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )
@@ -219,6 +222,7 @@ def main():
                 summary_metric="dropone_delta_llhi_z" if not args.use_raw else "dropone_delta_llhi",
                 include_delta_plot=False,
                 use_shuffle_line=not args.use_raw,
+                paired_points=plot_data.paired_points if args.paired_fit_only else None,
             )
             filter_label = f"full LLHI ≥ {args.min_full_llhi:g}"
         else:
@@ -230,6 +234,7 @@ def main():
                 compute_delta=False,
                 include_missing_cells=args.include_unfit_cells,
                 paired_fit_only=args.paired_fit_only,
+                include_paired_points=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )
@@ -248,6 +253,7 @@ def main():
                 summary_metric="dropone_rllhi",
                 include_delta_plot=False,
                 use_shuffle_line=False,
+                paired_points=plot_data.paired_points if args.paired_fit_only else None,
             )
             filter_label = f"full LLHI ≥ {args.min_full_llhi:g}"
 
