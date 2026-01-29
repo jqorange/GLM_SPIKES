@@ -18,6 +18,8 @@ from glm_poisson_forward.config import VARS_ALL
 
 HEAD_POSE_FEATURE = "head_pose"
 HEAD_POSE_COMPONENTS = ("roll", "yaw", "pitch")
+INDOOR_COLOR = "#1f77b4"
+OUTDOOR_COLOR = "#ff7f0e"
 
 
 @dataclass
@@ -697,10 +699,10 @@ def plot_combined_indoor_outdoor(
     bp_out = ax.boxplot(vals_out, positions=x + 0.18, widths=0.3, patch_artist=True, showfliers=False)
 
     for box in bp_in["boxes"]:
-        box.set_facecolor("#4C72B0")
+        box.set_facecolor(INDOOR_COLOR)
         box.set_alpha(0.55)
     for box in bp_out["boxes"]:
-        box.set_facecolor("#DD8452")
+        box.set_facecolor(OUTDOOR_COLOR)
         box.set_alpha(0.55)
 
     for i, f in enumerate(features_sorted):
@@ -738,8 +740,8 @@ def plot_combined_indoor_outdoor(
 
     ax.legend(
         handles=[
-            Patch(facecolor="#4C72B0", edgecolor="#4C72B0", alpha=0.55, label="indoor"),
-            Patch(facecolor="#DD8452", edgecolor="#DD8452", alpha=0.55, label="outdoor"),
+            Patch(facecolor=INDOOR_COLOR, edgecolor=INDOOR_COLOR, alpha=0.55, label="indoor"),
+            Patch(facecolor=OUTDOOR_COLOR, edgecolor=OUTDOOR_COLOR, alpha=0.55, label="outdoor"),
         ],
         frameon=False,
         loc="upper right",
@@ -779,8 +781,8 @@ def plot_single_group_sorted(
 
     bp = ax.boxplot(vals, positions=x, widths=0.5, patch_artist=True, showfliers=False)
 
-    fc = "#4C72B0" if group_label == "indoor" else "#DD8452"
-    edge_c = "#4C72B0" if group_label == "indoor" else "#DD8452"
+    fc = INDOOR_COLOR if group_label == "indoor" else OUTDOOR_COLOR
+    edge_c = INDOOR_COLOR if group_label == "indoor" else OUTDOOR_COLOR
 
     for box in bp["boxes"]:
         box.set_facecolor(fc)
