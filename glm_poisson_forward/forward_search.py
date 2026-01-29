@@ -25,7 +25,13 @@ from .config import (
     WEIGHTS_BASE,
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
-from .io_utils import filter_by_min_speed, load_spikes_50hz_counts, rebuild_inputs_50hz, session_paths
+from .io_utils import (
+    apply_residual_speed,
+    filter_by_min_speed,
+    load_spikes_50hz_counts,
+    rebuild_inputs_50hz,
+    session_paths,
+)
 from .metrics import compute_llhi_bps_poisson, dll_bits_series_poisson, wilcoxon_greater
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
@@ -230,8 +236,14 @@ def _plot_selected_models(rows, OUT_ROOT: Path, session: str):
             continue
 
 
-def run_one_session(session: str) -> Tuple[bool, str]:
-    OUT_ROOT = WEIGHTS_BASE / session
+def run_one_session(
+    session: str,
+    use_residual_speed: bool = False,
+    weights_base: Path | None = None,
+) -> Tuple[bool, str]:
+    if weights_base is None:
+        weights_base = WEIGHTS_BASE
+    OUT_ROOT = weights_base / session
     (OUT_ROOT / "logs").mkdir(parents=True, exist_ok=True)
     (OUT_ROOT / "figures").mkdir(parents=True, exist_ok=True)
 
@@ -256,6 +268,9 @@ def run_one_session(session: str) -> Tuple[bool, str]:
     data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
     if speed_mask is not None and not speed_mask.any():
         return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
+
+    if use_residual_speed:
+        data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)
