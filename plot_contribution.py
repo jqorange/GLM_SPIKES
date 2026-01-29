@@ -8,6 +8,7 @@ Drop-one contribution plotting (pyramidal-only) with:
   - Feature selection via --features (comma-separated). Features not listed are ignored.
   - Optional: use --forward_modulated_only to limit each feature to neurons whose forward-search
     final model includes that feature (still pyramidal only).
+  - Optional: use --paired_fit_only to keep only cells that were fit for a feature in both indoor and outdoor.
   - Filter: only neurons with full LL gain/LLHI >= threshold enter downstream analysis
   - Plots rLLR, ΔLLHI, and rLLHI in one run.
   - By default, uses shuffle-normalized z-scores for rLLR and ΔLLHI (use --use_raw to plot raw ΔLLHI).
@@ -100,6 +101,11 @@ def main():
         action="store_true",
         help="If set, include unfit cells as zeros in aggregation; otherwise exclude them.",
     )
+    ap.add_argument(
+        "--paired_fit_only",
+        action="store_true",
+        help="If set, per-feature neurons are restricted to cells fit in both indoor and outdoor for that feature.",
+    )
     args = ap.parse_args()
 
     features = [s.strip() for s in args.features.split(",") if s.strip()]
@@ -165,6 +171,7 @@ def main():
                 min_full_ll_gain=args.min_full_ll_gain,
                 compute_delta=True,
                 include_missing_cells=args.include_unfit_cells,
+                paired_fit_only=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )
@@ -193,6 +200,7 @@ def main():
                 min_full_ll_gain=args.min_full_llhi,
                 compute_delta=False,
                 include_missing_cells=args.include_unfit_cells,
+                paired_fit_only=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )
@@ -221,6 +229,7 @@ def main():
                 min_full_ll_gain=args.min_full_llhi,
                 compute_delta=False,
                 include_missing_cells=args.include_unfit_cells,
+                paired_fit_only=args.paired_fit_only,
                 include_head_pose=HEAD_POSE_FEATURE in plot_features,
                 head_pose_components=HEAD_POSE_COMPONENTS,
             )

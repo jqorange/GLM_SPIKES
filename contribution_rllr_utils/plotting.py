@@ -435,11 +435,49 @@ def collect_dropone_plot_data(
     include_missing_cells: bool = False,
     include_head_pose: bool = False,
     include_paired_points: bool = False,
+    paired_fit_only: bool = False,
     head_pose_components: Sequence[str] = HEAD_POSE_COMPONENTS,
 ) -> DroponePlotData:
     feat_list = [str(f).strip() for f in features]
     if include_head_pose and HEAD_POSE_FEATURE not in feat_list:
         feat_list.append(HEAD_POSE_FEATURE)
+
+    paired_fit_map: Dict[str, Dict[str, set[int]]] = {}
+    if paired_fit_only:
+        per_feature_group: Dict[str, Dict[str, Dict[str, set[int]]]] = {f: {} for f in feat_list}
+        for st in session_stats:
+            g = st.group
+            if g not in ("indoor", "outdoor"):
+                continue
+            base_id = base_session_id(st.session)
+            head_pose_map: Dict[int, float] = {}
+            if include_head_pose:
+                head_pose_map = compute_head_pose_map(
+                    st.frac_by_feature,
+                    components=head_pose_components,
+                    include_missing=False,
+                    neuron_ids=None,
+                )
+            for f in feat_list:
+                if f == HEAD_POSE_FEATURE:
+                    m = head_pose_map
+                else:
+                    m = st.frac_by_feature.get(f, {})
+                if not m:
+                    continue
+                ids = {int(ni) for ni, val in m.items() if np.isfinite(val)}
+                if not ids:
+                    continue
+                per_feature_group.setdefault(f, {}).setdefault(base_id, {}).setdefault(g, set()).update(ids)
+
+        paired_fit_map = {f: {} for f in feat_list}
+        for feat, base_map in per_feature_group.items():
+            for base_id, group_map in base_map.items():
+                indoor_ids = group_map.get("indoor", set())
+                outdoor_ids = group_map.get("outdoor", set())
+                paired_ids = indoor_ids & outdoor_ids
+                if paired_ids:
+                    paired_fit_map[feat][base_id] = paired_ids
 
     frac_by_session: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {"indoor": {f: {} for f in feat_list}, "outdoor": {f: {} for f in feat_list}}
     full_by_session: Dict[str, Dict[str, np.ndarray]] = {"indoor": {}, "outdoor": {}}
@@ -454,6 +492,7 @@ def collect_dropone_plot_data(
         g = st.group
         if g not in ("indoor", "outdoor"):
             continue
+        base_id = base_session_id(st.session)
 
         unfit_neurons = set(st.unfit_neuron_ids or [])
         if include_missing_cells:
@@ -512,11 +551,17 @@ def collect_dropone_plot_data(
                 m = st.frac_by_feature.get(f, {})
             if not eligible:
                 continue
+            eligible_feature = eligible
+            if paired_fit_only:
+                paired_ids = paired_fit_map.get(f, {}).get(base_id, set())
+                eligible_feature = eligible & paired_ids
+                if not eligible_feature:
+                    continue
 
             vals_frac = []
             vals_delta = []
             vals_shuf95 = []
-            for ni in eligible:
+            for ni in eligible_feature:
                 fracv = m.get(ni, 0.0 if include_missing_cells else np.nan)
                 ll_gain = 0.0 if ni in unfit_neurons else st.full_ll_gain.get(ni, 0.0)
                 if np.isfinite(fracv) and np.isfinite(ll_gain):
