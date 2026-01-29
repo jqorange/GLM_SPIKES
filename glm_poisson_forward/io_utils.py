@@ -157,3 +157,25 @@ def filter_by_min_speed(
     filtered["T"] = int(np.sum(mask))
     Y_all = Y_all[mask]
     return filtered, Y_all, mask
+
+
+def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    head_v = data_dict.get("head_v")
+    pos_idx = data_dict.get("position")
+    n_pos = data_dict.get("n_pos")
+    if head_v is None or pos_idx is None or n_pos is None:
+        return data_dict
+
+    n_pos = int(n_pos)
+    sums = np.bincount(pos_idx, weights=head_v, minlength=n_pos)
+    counts = np.bincount(pos_idx, minlength=n_pos)
+    mean_speed = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
+    speed_hat = mean_speed[pos_idx]
+    speed_res = head_v - speed_hat
+
+    updated = dict(data_dict)
+    updated["head_v_raw"] = head_v.astype(np.float32)
+    updated["head_v"] = speed_res.astype(np.float32)
+    updated["speed_hat"] = speed_hat.astype(np.float32)
+    updated["head_v_bin"] = bin_col(speed_res, n_bins=SPEED_N_BINS)
+    return updated
