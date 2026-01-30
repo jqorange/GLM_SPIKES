@@ -32,7 +32,13 @@ from .io_utils import (
     rebuild_inputs_50hz,
     session_paths,
 )
-from .metrics import compute_llhi_bps_poisson, dll_bits_series_poisson, wilcoxon_greater
+from .metrics import (
+    build_oof_constant_mu,
+    compute_llhi_bps_poisson,
+    dll_bits_series_poisson,
+    dll_bits_series_poisson_vs_baseline,
+    wilcoxon_greater,
+)
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
     fit_predict_one_fold_poisson,
@@ -73,7 +79,7 @@ def _llhi_cv_for_neuron(
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
-) -> Tuple[float, List[float], np.ndarray]:
+) -> Tuple[float, List[float], np.ndarray, np.ndarray]:
     X_all_m, _feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
@@ -87,7 +93,9 @@ def _llhi_cv_for_neuron(
 
     llhi_oof = compute_llhi_bps_poisson(y, mu_oof)
     dll_series_bits = dll_bits_series_poisson(y, mu_oof)
-    return float(llhi_oof), fold_llhi, dll_series_bits
+    mu0_oof = build_oof_constant_mu(y, folds_idx)
+    dll_series_vs_const = dll_bits_series_poisson_vs_baseline(y, mu_oof, mu0_oof)
+    return float(llhi_oof), fold_llhi, dll_series_bits, dll_series_vs_const
 
 
 def _save_accepted_step(
@@ -126,7 +134,9 @@ def _forward_select_one_neuron(
 
     single_candidates = []
     for v in remaining:
-        oof_llhi, fold_llhi, dll_seq = _llhi_cv_for_neuron([v], neuron_idx, Y_all, folds_idx, get_X_and_feats)
+        oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
+            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats
+        )
         single_candidates.append((v, oof_llhi, fold_llhi, dll_seq))
 
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
@@ -167,7 +177,9 @@ def _forward_select_one_neuron(
         cand_list = []
         for cand in remaining:
             trial_vars = selected + [cand]
-            oof_llhi, fold_llhi, dll_seq = _llhi_cv_for_neuron(trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats)
+            oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
+                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats
+            )
             cand_list.append((cand, trial_vars, oof_llhi, fold_llhi, dll_seq))
 
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
@@ -201,11 +213,33 @@ def _forward_select_one_neuron(
         if len(selected) == len(VARS_ALL):
             break
 
+    const_p = None
+    const_stat = None
+    const_n = None
+    if selected:
+        _llhi, _folds, _dll_prev, dll_vs_const = _llhi_cv_for_neuron(
+            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
+        )
+        const_stat, const_p, const_n = wilcoxon_greater(dll_vs_const, b=None)
+        if const_p >= ALPHA:
+            return {
+                "neuron": f"neuron_{neuron_idx+1}",
+                "final_model": None,
+                "classified": False,
+                "path": [vars(s) for s in path_records],
+                "const_rate_p_value": const_p,
+                "const_rate_stat": const_stat,
+                "const_rate_n_pairs": const_n,
+            }
+
     return {
         "neuron": f"neuron_{neuron_idx+1}",
         "final_model": selected,
         "classified": True,
         "path": [vars(s) for s in path_records],
+        "const_rate_p_value": const_p,
+        "const_rate_stat": const_stat,
+        "const_rate_n_pairs": const_n,
     }
 
 
