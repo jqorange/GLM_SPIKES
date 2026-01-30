@@ -43,6 +43,35 @@ def dll_bits_series_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> np.ndarra
     return (dll / np.log(2)).astype(np.float32)
 
 
+def build_oof_constant_mu(y_cnt: np.ndarray, folds_idx) -> np.ndarray:
+    y = np.asarray(y_cnt, dtype=np.float64).ravel()
+    mu_oof = np.full_like(y, fill_value=1e-12, dtype=np.float64)
+    for tr, va in folds_idx:
+        mean_tr = float(np.mean(y[tr]))
+        mu_oof[va] = max(mean_tr, 1e-12)
+    return mu_oof
+
+
+def dll_bits_series_poisson_vs_baseline(
+    y_cnt: np.ndarray,
+    mu_pred: np.ndarray,
+    mu_base: np.ndarray,
+) -> np.ndarray:
+    y = np.asarray(y_cnt, dtype=np.float64).ravel()
+    mu = np.asarray(mu_pred, dtype=np.float64).ravel()
+    mu0 = np.asarray(mu_base, dtype=np.float64).ravel()
+    if y.size == 0:
+        return np.array([], dtype=np.float32)
+
+    mu = np.clip(mu, 1e-12, None)
+    mu0 = np.clip(mu0, 1e-12, None)
+
+    ll_m = y * np.log(mu) - mu
+    ll_b = y * np.log(mu0) - mu0
+    dll = ll_m - ll_b
+    return (dll / np.log(2)).astype(np.float32)
+
+
 def wilcoxon_greater(a: np.ndarray, b: np.ndarray = None) -> Tuple[float, float, int]:
     if b is None:
         x = np.asarray(a, dtype=np.float64)
@@ -59,4 +88,3 @@ def wilcoxon_greater(a: np.ndarray, b: np.ndarray = None) -> Tuple[float, float,
         mode="auto",
     )
     return float(stat), float(p), int(x.size)
-
