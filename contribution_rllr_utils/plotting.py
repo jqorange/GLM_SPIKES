@@ -20,7 +20,7 @@ HEAD_POSE_FEATURE = "head_pose"
 HEAD_POSE_COMPONENTS = ("roll", "yaw", "pitch")
 INDOOR_COLOR = "#1f77b4"
 OUTDOOR_COLOR = "#ff7f0e"
-
+PAIRED_LINE_COLOR = (1.0, 0.4, 0.4)
 
 @dataclass
 class DroponeSessionStats:
@@ -726,7 +726,7 @@ def plot_combined_indoor_outdoor(
                 ax.plot(
                     [x[i] - 0.18, x[i] + 0.18],
                     [yin, yout],
-                    color="0.5",
+                    color=PAIRED_LINE_COLOR,
                     alpha=0.35,
                     linewidth=0.6,
                     zorder=2,
