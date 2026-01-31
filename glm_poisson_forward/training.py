@@ -7,12 +7,108 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
+from scipy.optimize import minimize
 from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
-from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
+from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA, POSITION_SMOOTH_LAMBDA
 from .design_matrix import ensure_feature_mapping, model_key_from_vars
 from .metrics import compute_llhi_bps_poisson
+
+
+def _position_feature_map(feature_names: List[str]) -> Tuple[List[Tuple[int, int]], int]:
+    pos_pairs: List[Tuple[int, int]] = []
+    max_cat = -1
+    for idx, name in enumerate(feature_names):
+        if not name.startswith("position_"):
+            continue
+        try:
+            cat = int(name.split("_", 1)[1])
+        except ValueError:
+            continue
+        pos_pairs.append((idx, cat))
+        max_cat = max(max_cat, cat)
+    n_pos = max_cat + 1
+    return pos_pairs, n_pos
+
+
+def _build_position_laplacian(pos_bins: np.ndarray, n_pos: int) -> sparse.csr_matrix:
+    if pos_bins is None or n_pos <= 1:
+        return sparse.csr_matrix((n_pos, n_pos), dtype=np.float32)
+    coords = {(int(x), int(y)): i for i, (x, y) in enumerate(pos_bins)}
+    rows = []
+    cols = []
+    data = []
+    for (x, y), idx in coords.items():
+        for dx, dy in ((1, 0), (0, 1)):
+            nbr = (x + dx, y + dy)
+            jdx = coords.get(nbr)
+            if jdx is None:
+                continue
+            rows.extend([idx, jdx, idx, jdx])
+            cols.extend([idx, jdx, jdx, idx])
+            data.extend([1.0, 1.0, -1.0, -1.0])
+    return sparse.csr_matrix((data, (rows, cols)), shape=(n_pos, n_pos), dtype=np.float32)
+
+
+def _fit_poisson_model(
+    Xtr: sparse.csr_matrix,
+    ytr: np.ndarray,
+    feature_names: List[str] | None = None,
+    pos_bins: np.ndarray | None = None,
+) -> Tuple[np.ndarray, float]:
+    mean_tr = float(np.mean(ytr))
+    if mean_tr <= 0:
+        w = np.zeros(Xtr.shape[1], dtype=np.float32)
+        b = float(np.log(1e-12))
+        return w, b
+
+    smooth_lambda = float(POSITION_SMOOTH_LAMBDA)
+    pos_pairs, n_pos = _position_feature_map(feature_names or [])
+    use_smoothing = smooth_lambda > 0 and pos_pairs and n_pos > 1 and pos_bins is not None
+    if not use_smoothing:
+        mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
+        mdl.fit(Xtr, ytr)
+        return mdl.coef_.ravel().astype(np.float32), float(mdl.intercept_)
+
+    pos_laplacian = _build_position_laplacian(pos_bins, n_pos)
+
+    def objective(params: np.ndarray) -> Tuple[float, np.ndarray]:
+        w = params[:-1]
+        b = params[-1]
+        eta = Xtr.dot(w) + b
+        mu = np.exp(eta)
+        residual = mu - ytr
+        nll = float(np.sum(mu - ytr * eta))
+        grad_w = Xtr.T.dot(residual) + 2.0 * POISSON_ALPHA * w
+        grad_b = float(np.sum(residual))
+
+        if pos_laplacian.shape[0] > 1:
+            w_full = np.zeros(n_pos, dtype=np.float64)
+            for feat_idx, cat in pos_pairs:
+                if cat < n_pos:
+                    w_full[cat] = w[feat_idx]
+            lap_w = pos_laplacian.dot(w_full)
+            nll += smooth_lambda * float(w_full.dot(lap_w))
+            grad_full = 2.0 * smooth_lambda * lap_w
+            for feat_idx, cat in pos_pairs:
+                if cat < n_pos:
+                    grad_w[feat_idx] += grad_full[cat]
+
+        grad = np.concatenate([np.asarray(grad_w).ravel(), np.array([grad_b])])
+        return nll, grad
+
+    w0 = np.zeros(Xtr.shape[1] + 1, dtype=np.float64)
+    w0[-1] = np.log(mean_tr + 1e-12)
+    res = minimize(
+        fun=lambda p: objective(p),
+        x0=w0,
+        jac=True,
+        method="L-BFGS-B",
+        options={"maxiter": MAX_ITER},
+    )
+    w_opt = res.x.astype(np.float32)
+    return w_opt[:-1], float(w_opt[-1])
 
 
 def fit_predict_one_fold_poisson(
@@ -20,19 +116,14 @@ def fit_predict_one_fold_poisson(
     y_all: np.ndarray,
     tr_idx: np.ndarray,
     va_idx: np.ndarray,
+    feature_names: List[str] | None = None,
+    pos_bins: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, float]:
     Xtr, Xva = X_all[tr_idx], X_all[va_idx]
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
 
-    mean_tr = float(np.mean(ytr))
-    if mean_tr <= 0:
-        mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
-        llhi = compute_llhi_bps_poisson(yva, mu_va)
-        return mu_va.astype(np.float32), float(llhi)
-
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
-    mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+    w, b = _fit_poisson_model(Xtr, ytr, feature_names=feature_names, pos_bins=pos_bins)
+    mu_va = np.clip(np.exp(Xva.dot(w) + b).astype(np.float64), 1e-12, None)
 
     llhi = compute_llhi_bps_poisson(yva, mu_va)
     return mu_va.astype(np.float32), float(llhi)
@@ -42,21 +133,21 @@ def _fit_one_fold_weights_poisson(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     tr_idx: np.ndarray,
+    feature_names: List[str] | None = None,
+    pos_bins: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return w = [coef..., intercept] for one fold (fit on train only)."""
     Xtr = X_all[tr_idx]
     ytr = y_all[tr_idx].astype(np.float64)
 
-    mean_tr = float(np.mean(ytr))
-    if mean_tr <= 0:
-        w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
-        w[-1] = np.log(1e-12)
-        return w
-
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
+    w_coef, w_intercept = _fit_poisson_model(
+        Xtr,
+        ytr,
+        feature_names=feature_names,
+        pos_bins=pos_bins,
+    )
     w = np.concatenate(
-        [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
+        [w_coef.astype(np.float32), np.array([w_intercept], dtype=np.float32)]
     )
     return w
 
@@ -70,6 +161,7 @@ def save_neuron_artifacts_for_model(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     feature_names: List[str],
+    pos_bins: np.ndarray | None = None,
 ) -> Dict:
     neuron_dir.mkdir(parents=True, exist_ok=True)
     ensure_feature_mapping(str(model_dir), feature_names)
@@ -84,18 +176,16 @@ def save_neuron_artifacts_for_model(
         Xtr, Xva = X_all[tr], X_all[va]
         ytr, yva = y_all[tr].astype(np.float64), y_all[va].astype(np.float64)
 
-        mean_tr = float(np.mean(ytr))
-        if mean_tr <= 0:
-            mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
-            w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
-            w[-1] = np.log(1e-12)
-        else:
-            mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-            mdl.fit(Xtr, ytr)
-            mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
-            w = np.concatenate(
-                [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
-            )
+        w_coef, w_intercept = _fit_poisson_model(
+            Xtr,
+            ytr,
+            feature_names=feature_names,
+            pos_bins=pos_bins,
+        )
+        mu_va = np.clip(np.exp(Xva.dot(w_coef) + w_intercept).astype(np.float64), 1e-12, None)
+        w = np.concatenate(
+            [w_coef.astype(np.float32), np.array([w_intercept], dtype=np.float32)]
+        )
 
         pd.DataFrame(
             w.reshape(1, -1),
@@ -148,6 +238,7 @@ def save_full_fit_weights_for_all_neurons(
     feature_names: List[str],
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+    pos_bins: np.ndarray | None = None,
     n_jobs: int = N_JOBS,
 ):
     """
@@ -169,7 +260,13 @@ def save_full_fit_weights_for_all_neurons(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = _fit_one_fold_weights_poisson(X_all, y, tr)
+                w = _fit_one_fold_weights_poisson(
+                    X_all,
+                    y,
+                    tr,
+                    feature_names=feature_names,
+                    pos_bins=pos_bins,
+                )
                 ws.append(w)
 
                 fold_dir = neuron_dir / f"fold{k}"

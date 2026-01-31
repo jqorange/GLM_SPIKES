@@ -32,6 +32,9 @@ ALPHA = 0.05
 MAX_ITER = 500
 POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
 
+# Position smoothing (graph Laplacian)
+POSITION_SMOOTH_LAMBDA = 0.0  # 0 disables smoothing; >0 enables spatial smoothing on position weights
+
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 

@@ -79,6 +79,7 @@ def _llhi_cv_for_neuron(
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
+    pos_bins: np.ndarray | None,
 ) -> Tuple[float, List[float], np.ndarray, np.ndarray]:
     X_all_m, _feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
@@ -87,7 +88,14 @@ def _llhi_cv_for_neuron(
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
+        mu_va, llhi = fit_predict_one_fold_poisson(
+            X_all_m,
+            y,
+            tr,
+            va,
+            feature_names=_feat,
+            pos_bins=pos_bins,
+        )
         fold_llhi.append(float(llhi))
         mu_oof[va] = mu_va
 
@@ -105,6 +113,7 @@ def _save_accepted_step(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     Y_all: np.ndarray,
     get_X_and_feats,
+    pos_bins: np.ndarray | None,
 ):
     model_dir = OUT_ROOT / model_key_from_vars(model_vars)
     X_all_m, feat_names = get_X_and_feats(model_vars)
@@ -119,6 +128,7 @@ def _save_accepted_step(
         X_all=X_all_m,
         y_all=y,
         feature_names=feat_names,
+        pos_bins=pos_bins,
     )
 
 
@@ -128,6 +138,7 @@ def _forward_select_one_neuron(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     OUT_ROOT: Path,
     get_X_and_feats,
+    pos_bins: np.ndarray | None,
 ):
     path_records: List[StepRecord] = []
     remaining = VARS_ALL.copy()
@@ -135,7 +146,7 @@ def _forward_select_one_neuron(
     single_candidates = []
     for v in remaining:
         oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
-            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats
+            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats, pos_bins
         )
         single_candidates.append((v, oof_llhi, fold_llhi, dll_seq))
 
@@ -166,7 +177,7 @@ def _forward_select_one_neuron(
             "path": [vars(s) for s in path_records],
         }
 
-    _save_accepted_step(neuron_idx, [best_v], OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
+    _save_accepted_step(neuron_idx, [best_v], OUT_ROOT, folds_idx, Y_all, get_X_and_feats, pos_bins)
 
     selected = [best_v]
     remaining.remove(best_v)
@@ -178,7 +189,7 @@ def _forward_select_one_neuron(
         for cand in remaining:
             trial_vars = selected + [cand]
             oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
-                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats
+                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats, pos_bins
             )
             cand_list.append((cand, trial_vars, oof_llhi, fold_llhi, dll_seq))
 
@@ -204,7 +215,15 @@ def _forward_select_one_neuron(
         if not accepted:
             break
 
-        _save_accepted_step(neuron_idx, best_trial_vars, OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
+        _save_accepted_step(
+            neuron_idx,
+            best_trial_vars,
+            OUT_ROOT,
+            folds_idx,
+            Y_all,
+            get_X_and_feats,
+            pos_bins,
+        )
         selected = best_trial_vars
         remaining.remove(best_cand)
         oof_dll_prev = best_trial_dll
@@ -218,7 +237,7 @@ def _forward_select_one_neuron(
     const_n = None
     if selected:
         _llhi, _folds, _dll_prev, dll_vs_const = _llhi_cv_for_neuron(
-            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
+            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats, pos_bins
         )
         const_stat, const_p, const_n = wilcoxon_greater(dll_vs_const, b=None)
         if const_p >= ALPHA:
@@ -320,11 +339,19 @@ def run_one_session(
         feature_names=feats_full,
         Y_all=Y_all,
         folds_idx=folds_idx,
+        pos_bins=data_dict.get("pos_bins"),
         n_jobs=N_JOBS,
     )
 
     results = Parallel(n_jobs=N_JOBS, backend="loky")(
-        delayed(_forward_select_one_neuron)(i, Y_all, folds_idx, OUT_ROOT, get_X_and_feats)
+        delayed(_forward_select_one_neuron)(
+            i,
+            Y_all,
+            folds_idx,
+            OUT_ROOT,
+            get_X_and_feats,
+            data_dict.get("pos_bins"),
+        )
         for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Poisson)")
     )
 
