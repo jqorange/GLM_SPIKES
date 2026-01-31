@@ -32,13 +32,7 @@ from .io_utils import (
     rebuild_inputs_50hz,
     session_paths,
 )
-from .metrics import (
-    build_oof_constant_mu,
-    compute_llhi_bps_poisson,
-    dll_bits_series_poisson,
-    dll_bits_series_poisson_vs_baseline,
-    wilcoxon_greater,
-)
+from .metrics import compute_llhi_bps_poisson, wilcoxon_greater
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
     fit_predict_one_fold_poisson,
@@ -79,7 +73,7 @@ def _llhi_cv_for_neuron(
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
-) -> Tuple[float, List[float], np.ndarray, np.ndarray]:
+) -> Tuple[float, List[float]]:
     X_all_m, _feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
@@ -92,10 +86,7 @@ def _llhi_cv_for_neuron(
         mu_oof[va] = mu_va
 
     llhi_oof = compute_llhi_bps_poisson(y, mu_oof)
-    dll_series_bits = dll_bits_series_poisson(y, mu_oof)
-    mu0_oof = build_oof_constant_mu(y, folds_idx)
-    dll_series_vs_const = dll_bits_series_poisson_vs_baseline(y, mu_oof, mu0_oof)
-    return float(llhi_oof), fold_llhi, dll_series_bits, dll_series_vs_const
+    return float(llhi_oof), fold_llhi
 
 
 def _save_accepted_step(
@@ -134,15 +125,13 @@ def _forward_select_one_neuron(
 
     single_candidates = []
     for v in remaining:
-        oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
-            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats
-        )
-        single_candidates.append((v, oof_llhi, fold_llhi, dll_seq))
+        oof_llhi, fold_llhi = _llhi_cv_for_neuron([v], neuron_idx, Y_all, folds_idx, get_X_and_feats)
+        single_candidates.append((v, oof_llhi, fold_llhi))
 
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
-    best_v, best_oof_llhi, best_fold, best_dll_seq = single_candidates[0]
+    best_v, best_oof_llhi, best_fold = single_candidates[0]
 
-    stat, p, n = wilcoxon_greater(best_dll_seq, b=None)
+    stat, p, n = wilcoxon_greater(best_fold, b=None)
     accepted = (p < ALPHA)
 
     path_records.append(
@@ -170,22 +159,20 @@ def _forward_select_one_neuron(
 
     selected = [best_v]
     remaining.remove(best_v)
-    oof_dll_prev = best_dll_seq
+    fold_llhi_prev = list(best_fold)
 
     step = 2
     while remaining:
         cand_list = []
         for cand in remaining:
             trial_vars = selected + [cand]
-            oof_llhi, fold_llhi, dll_seq, _dll_seq_const = _llhi_cv_for_neuron(
-                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats
-            )
-            cand_list.append((cand, trial_vars, oof_llhi, fold_llhi, dll_seq))
+            oof_llhi, fold_llhi = _llhi_cv_for_neuron(trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats)
+            cand_list.append((cand, trial_vars, oof_llhi, fold_llhi))
 
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
-        best_cand, best_trial_vars, best_trial_oof_llhi, best_trial_fold, best_trial_dll = cand_list[0]
+        best_cand, best_trial_vars, best_trial_oof_llhi, best_trial_fold = cand_list[0]
 
-        stat, p, n = wilcoxon_greater(best_trial_dll, oof_dll_prev)
+        stat, p, n = wilcoxon_greater(best_trial_fold, fold_llhi_prev)
         accepted = (p < ALPHA)
 
         path_records.append(
@@ -207,7 +194,7 @@ def _forward_select_one_neuron(
         _save_accepted_step(neuron_idx, best_trial_vars, OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
         selected = best_trial_vars
         remaining.remove(best_cand)
-        oof_dll_prev = best_trial_dll
+        fold_llhi_prev = list(best_trial_fold)
         step += 1
 
         if len(selected) == len(VARS_ALL):
@@ -217,10 +204,8 @@ def _forward_select_one_neuron(
     const_stat = None
     const_n = None
     if selected:
-        _llhi, _folds, _dll_prev, dll_vs_const = _llhi_cv_for_neuron(
-            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
-        )
-        const_stat, const_p, const_n = wilcoxon_greater(dll_vs_const, b=None)
+        _llhi, fold_llhi = _llhi_cv_for_neuron(selected, neuron_idx, Y_all, folds_idx, get_X_and_feats)
+        const_stat, const_p, const_n = wilcoxon_greater(fold_llhi, b=None)
         if const_p >= ALPHA:
             return {
                 "neuron": f"neuron_{neuron_idx+1}",
