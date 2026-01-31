@@ -28,9 +28,23 @@ MAX_MISMATCH_FRAMES_50HZ = 5  # tolerance in 50 Hz frames
 # Forward-selection test threshold
 ALPHA = 0.05
 
-# PoissonRegressor params
+# PoissonGLM params
 MAX_ITER = 500
-POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
+POISSON_ALPHA = 1e-6  # Deprecated: legacy ridge for PoissonRegressor (kept for reference)
+
+# Group-specific regularization (forward-search GLM)
+# Position: 2D smoothing + very small ridge
+REG_POSITION_SMOOTH = 1e-2
+REG_POSITION_RIDGE = 1e-6
+# Speed: mild 1D smoothing or small ridge
+REG_SPEED_SMOOTH = 5e-3
+REG_SPEED_RIDGE = 1e-6
+# Angles: circular smoothing (roll/yaw/pitch)
+REG_ANGLE_SMOOTH = 1e-2
+REG_ANGLE_RIDGE = 0.0
+
+# GPU acceleration (best-effort)
+USE_TORCH = True
 
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]

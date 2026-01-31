@@ -1,18 +1,252 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import h5py
 import numpy as np
 import pandas as pd
+import torch
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
-from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
+from .config import (
+    ANGLE_N_BINS,
+    FULL_FIT_DIRNAME,
+    MAX_ITER,
+    N_JOBS,
+    POISSON_ALPHA,
+    REG_ANGLE_RIDGE,
+    REG_ANGLE_SMOOTH,
+    REG_POSITION_RIDGE,
+    REG_POSITION_SMOOTH,
+    REG_SPEED_RIDGE,
+    REG_SPEED_SMOOTH,
+    SPEED_N_BINS,
+    USE_TORCH,
+)
 from .design_matrix import ensure_feature_mapping, model_key_from_vars
 from .metrics import compute_llhi_bps_poisson
+
+
+@dataclass(frozen=True)
+class RidgePenalty:
+    name: str
+    lambda_: float
+    indices: np.ndarray
+
+
+@dataclass(frozen=True)
+class SmoothPenalty:
+    name: str
+    lambda_: float
+    edge_i: np.ndarray
+    edge_j: np.ndarray
+
+
+@dataclass(frozen=True)
+class RegularizationSpec:
+    ridge: Tuple[RidgePenalty, ...]
+    smooth: Tuple[SmoothPenalty, ...]
+
+
+def _build_position_edges(position_bins: np.ndarray) -> List[Tuple[int, int]]:
+    edges: List[Tuple[int, int]] = []
+    if position_bins is None or position_bins.size == 0:
+        return edges
+    lookup = {(int(x), int(y)): i for i, (x, y) in enumerate(position_bins)}
+    for idx, (x_bin, y_bin) in enumerate(position_bins):
+        right = (int(x_bin) + 1, int(y_bin))
+        up = (int(x_bin), int(y_bin) + 1)
+        if right in lookup:
+            edges.append((idx, lookup[right]))
+        if up in lookup:
+            edges.append((idx, lookup[up]))
+    return edges
+
+
+def _build_1d_edges(n_bins: int, circular: bool) -> List[Tuple[int, int]]:
+    edges = [(i, i - 1) for i in range(1, n_bins)]
+    if circular and n_bins > 1:
+        edges.append((0, n_bins - 1))
+    return edges
+
+
+def _edges_to_feature_indices(
+    edges: List[Tuple[int, int]],
+    bin_to_feature: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    edge_i: List[int] = []
+    edge_j: List[int] = []
+    for bin_a, bin_b in edges:
+        idx_a = int(bin_to_feature[bin_a])
+        idx_b = int(bin_to_feature[bin_b])
+        if idx_a < 0 and idx_b < 0:
+            continue
+        if idx_a < 0:
+            edge_i.append(idx_b)
+            edge_j.append(-1)
+        elif idx_b < 0:
+            edge_i.append(idx_a)
+            edge_j.append(-1)
+        else:
+            edge_i.append(idx_a)
+            edge_j.append(idx_b)
+    return np.asarray(edge_i, dtype=np.int64), np.asarray(edge_j, dtype=np.int64)
+
+
+def build_group_regularization(
+    feature_names: List[str],
+    data_dict: Dict[str, np.ndarray],
+) -> RegularizationSpec:
+    prefix_map = {
+        "position": "position",
+        "head_v": "speed",
+        "roll": "roll",
+        "yaw": "yaw",
+        "pitch": "pitch",
+    }
+    group_bins: Dict[str, Dict[int, int]] = {g: {} for g in prefix_map.values()}
+    for idx, name in enumerate(feature_names):
+        if name == "intercept":
+            continue
+        for prefix, group in prefix_map.items():
+            if name.startswith(f"{prefix}_"):
+                bin_idx = int(name[len(prefix) + 1 :])
+                group_bins[group][bin_idx] = idx
+                break
+
+    ridge_penalties: List[RidgePenalty] = []
+    smooth_penalties: List[SmoothPenalty] = []
+
+    def add_ridge(group: str, lam: float):
+        if lam <= 0:
+            return
+        bins = group_bins.get(group, {})
+        if not bins:
+            return
+        indices = np.array(sorted(bins.values()), dtype=np.int64)
+        ridge_penalties.append(RidgePenalty(group, lam, indices))
+
+    def add_smooth(group: str, lam: float, edges: List[Tuple[int, int]], n_bins: int):
+        if lam <= 0:
+            return
+        bins = group_bins.get(group, {})
+        if not bins:
+            return
+        bin_to_feature = np.full(n_bins, -1, dtype=np.int64)
+        for b, feat_idx in bins.items():
+            bin_to_feature[int(b)] = int(feat_idx)
+        edge_i, edge_j = _edges_to_feature_indices(edges, bin_to_feature)
+        if edge_i.size == 0:
+            return
+        smooth_penalties.append(SmoothPenalty(group, lam, edge_i, edge_j))
+
+    n_pos = int(data_dict.get("n_pos", 0))
+    pos_bins = data_dict.get("position_bins")
+    if n_pos > 0 and pos_bins is not None:
+        pos_edges = _build_position_edges(pos_bins)
+        add_smooth("position", REG_POSITION_SMOOTH, pos_edges, n_pos)
+    add_ridge("position", REG_POSITION_RIDGE)
+
+    add_smooth("speed", REG_SPEED_SMOOTH, _build_1d_edges(SPEED_N_BINS, circular=False), SPEED_N_BINS)
+    add_ridge("speed", REG_SPEED_RIDGE)
+
+    angle_edges = _build_1d_edges(ANGLE_N_BINS, circular=True)
+    for ang in ["roll", "yaw", "pitch"]:
+        add_smooth(ang, REG_ANGLE_SMOOTH, angle_edges, ANGLE_N_BINS)
+        add_ridge(ang, REG_ANGLE_RIDGE)
+
+    return RegularizationSpec(tuple(ridge_penalties), tuple(smooth_penalties))
+
+
+def _torch_sparse_from_csr(X: sparse.csr_matrix, device: torch.device) -> torch.Tensor:
+    X_coo = X.tocoo()
+    indices = np.vstack((X_coo.row, X_coo.col))
+    i_t = torch.tensor(indices, dtype=torch.int64, device=device)
+    v_t = torch.tensor(X_coo.data, dtype=torch.float32, device=device)
+    return torch.sparse_coo_tensor(i_t, v_t, size=X_coo.shape, device=device)
+
+
+def _torch_penalty(
+    w: torch.Tensor,
+    ridge_terms: List[Tuple[float, torch.Tensor]],
+    smooth_terms: List[Tuple[float, torch.Tensor, torch.Tensor]],
+) -> torch.Tensor:
+    penalty = torch.tensor(0.0, device=w.device)
+    for lam, idx in ridge_terms:
+        penalty = penalty + 0.5 * lam * torch.sum(w[idx] ** 2)
+    for lam, idx_i, idx_j in smooth_terms:
+        w_i = w[idx_i]
+        mask = idx_j >= 0
+        if torch.any(mask):
+            w_j = torch.zeros_like(w_i)
+            w_j[mask] = w[idx_j[mask]]
+        else:
+            w_j = torch.zeros_like(w_i)
+        diff = w_i - w_j
+        penalty = penalty + 0.5 * lam * torch.sum(diff**2)
+    return penalty
+
+
+def _fit_poisson_torch(
+    X: sparse.csr_matrix,
+    y: np.ndarray,
+    reg_spec: RegularizationSpec,
+) -> Tuple[np.ndarray, float]:
+    if y.size == 0:
+        return np.zeros(X.shape[1], dtype=np.float32), float(np.log(1e-12))
+    device = torch.device("cuda" if USE_TORCH and torch.cuda.is_available() else "cpu")
+    X_t = _torch_sparse_from_csr(X, device=device)
+    y_t = torch.tensor(y, dtype=torch.float32, device=device)
+    w = torch.zeros(X.shape[1], dtype=torch.float32, device=device, requires_grad=True)
+    intercept = torch.tensor(float(np.log(np.mean(y) + 1e-12)), device=device, requires_grad=True)
+    opt = torch.optim.LBFGS([w, intercept], max_iter=MAX_ITER, line_search_fn="strong_wolfe")
+    ridge_terms = [
+        (ridge.lambda_, torch.tensor(ridge.indices, dtype=torch.int64, device=device))
+        for ridge in reg_spec.ridge
+        if ridge.lambda_ > 0 and ridge.indices.size > 0
+    ]
+    smooth_terms = [
+        (
+            smooth.lambda_,
+            torch.tensor(smooth.edge_i, dtype=torch.int64, device=device),
+            torch.tensor(smooth.edge_j, dtype=torch.int64, device=device),
+        )
+        for smooth in reg_spec.smooth
+        if smooth.lambda_ > 0 and smooth.edge_i.size > 0
+    ]
+
+    def closure():
+        opt.zero_grad(set_to_none=True)
+        eta = torch.sparse.mm(X_t, w.unsqueeze(1)).squeeze(1) + intercept
+        mu = torch.exp(eta)
+        loss = torch.sum(mu - y_t * eta)
+        loss = loss + _torch_penalty(w, ridge_terms, smooth_terms)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return w.detach().cpu().numpy(), float(intercept.detach().cpu().numpy())
+
+
+def _fit_poisson_weights(
+    X: sparse.csr_matrix,
+    y: np.ndarray,
+    reg_spec: RegularizationSpec,
+) -> Tuple[np.ndarray, float]:
+    return _fit_poisson_torch(X, y, reg_spec)
+
+
+def _predict_mu(
+    X: sparse.csr_matrix,
+    w: np.ndarray,
+    intercept: float,
+) -> np.ndarray:
+    eta = X @ w + float(intercept)
+    mu = np.exp(np.clip(eta, -20.0, 20.0))
+    return np.clip(mu.astype(np.float64), 1e-12, None)
 
 
 def fit_predict_one_fold_poisson(
@@ -20,6 +254,7 @@ def fit_predict_one_fold_poisson(
     y_all: np.ndarray,
     tr_idx: np.ndarray,
     va_idx: np.ndarray,
+    reg_spec: RegularizationSpec,
 ) -> Tuple[np.ndarray, float]:
     Xtr, Xva = X_all[tr_idx], X_all[va_idx]
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
@@ -30,9 +265,8 @@ def fit_predict_one_fold_poisson(
         llhi = compute_llhi_bps_poisson(yva, mu_va)
         return mu_va.astype(np.float32), float(llhi)
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
-    mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+    w, intercept = _fit_poisson_weights(Xtr, ytr, reg_spec)
+    mu_va = _predict_mu(Xva, w, intercept)
 
     llhi = compute_llhi_bps_poisson(yva, mu_va)
     return mu_va.astype(np.float32), float(llhi)
@@ -42,6 +276,7 @@ def _fit_one_fold_weights_poisson(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     tr_idx: np.ndarray,
+    reg_spec: RegularizationSpec,
 ) -> np.ndarray:
     """Return w = [coef..., intercept] for one fold (fit on train only)."""
     Xtr = X_all[tr_idx]
@@ -53,11 +288,8 @@ def _fit_one_fold_weights_poisson(
         w[-1] = np.log(1e-12)
         return w
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
-    w = np.concatenate(
-        [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
-    )
+    coef, intercept = _fit_poisson_weights(Xtr, ytr, reg_spec)
+    w = np.concatenate([coef.astype(np.float32), np.array([intercept], dtype=np.float32)])
     return w
 
 
@@ -70,6 +302,7 @@ def save_neuron_artifacts_for_model(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     feature_names: List[str],
+    reg_spec: RegularizationSpec,
 ) -> Dict:
     neuron_dir.mkdir(parents=True, exist_ok=True)
     ensure_feature_mapping(str(model_dir), feature_names)
@@ -90,12 +323,9 @@ def save_neuron_artifacts_for_model(
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
             w[-1] = np.log(1e-12)
         else:
-            mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-            mdl.fit(Xtr, ytr)
-            mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
-            w = np.concatenate(
-                [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
-            )
+            coef, intercept = _fit_poisson_weights(Xtr, ytr, reg_spec)
+            mu_va = _predict_mu(Xva, coef, intercept)
+            w = np.concatenate([coef.astype(np.float32), np.array([intercept], dtype=np.float32)])
 
         pd.DataFrame(
             w.reshape(1, -1),
@@ -127,6 +357,20 @@ def save_neuron_artifacts_for_model(
                 "mean_llhi_over_folds_bits_per_spike": float(mean_llhi),
                 "fold_llhi_bits_per_spike": list(map(float, fold_llhi)),
                 "poisson_alpha": float(POISSON_ALPHA),
+                "regularization": {
+                    "position": {
+                        "smooth": float(REG_POSITION_SMOOTH),
+                        "ridge": float(REG_POSITION_RIDGE),
+                    },
+                    "speed": {
+                        "smooth": float(REG_SPEED_SMOOTH),
+                        "ridge": float(REG_SPEED_RIDGE),
+                    },
+                    "angle": {
+                        "smooth": float(REG_ANGLE_SMOOTH),
+                        "ridge": float(REG_ANGLE_RIDGE),
+                    },
+                },
             },
             f,
             indent=2,
@@ -148,6 +392,7 @@ def save_full_fit_weights_for_all_neurons(
     feature_names: List[str],
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+    reg_spec: RegularizationSpec,
     n_jobs: int = N_JOBS,
 ):
     """
@@ -169,7 +414,7 @@ def save_full_fit_weights_for_all_neurons(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = _fit_one_fold_weights_poisson(X_all, y, tr)
+                w = _fit_one_fold_weights_poisson(X_all, y, tr, reg_spec)
                 ws.append(w)
 
                 fold_dir = neuron_dir / f"fold{k}"

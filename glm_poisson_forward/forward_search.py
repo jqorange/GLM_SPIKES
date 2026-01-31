@@ -41,6 +41,7 @@ from .metrics import (
 )
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
+    build_group_regularization,
     fit_predict_one_fold_poisson,
     save_full_fit_weights_for_all_neurons,
     save_neuron_artifacts_for_model,
@@ -48,15 +49,16 @@ from .training import (
 
 
 def _build_design_cache(data_dict: Dict[str, np.ndarray]):
-    cache: Dict[str, Tuple[sparse.csr_matrix, List[str]]] = {}
+    cache: Dict[str, Tuple[sparse.csr_matrix, List[str], object]] = {}
 
-    def get_X_and_feats(model_vars: List[str]) -> Tuple[sparse.csr_matrix, List[str]]:
+    def get_X_and_feats(model_vars: List[str]) -> Tuple[sparse.csr_matrix, List[str], object]:
         mk = model_key_from_vars(model_vars)
         if mk in cache:
             return cache[mk]
         X, feats = build_design_matrix(model_vars, data_dict)
-        cache[mk] = (X, feats)
-        return X, feats
+        reg_spec = build_group_regularization(feats, data_dict)
+        cache[mk] = (X, feats, reg_spec)
+        return X, feats, reg_spec
 
     return get_X_and_feats
 
@@ -80,14 +82,14 @@ def _llhi_cv_for_neuron(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
 ) -> Tuple[float, List[float], np.ndarray, np.ndarray]:
-    X_all_m, _feat = get_X_and_feats(model_vars)
+    X_all_m, _feat, reg_spec = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
     fold_llhi: List[float] = []
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
+        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, reg_spec)
         fold_llhi.append(float(llhi))
         mu_oof[va] = mu_va
 
@@ -107,7 +109,7 @@ def _save_accepted_step(
     get_X_and_feats,
 ):
     model_dir = OUT_ROOT / model_key_from_vars(model_vars)
-    X_all_m, feat_names = get_X_and_feats(model_vars)
+    X_all_m, feat_names, reg_spec = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
     neuron_dir = model_dir / f"neuron_{neuron_idx+1}"
     return save_neuron_artifacts_for_model(
@@ -119,6 +121,7 @@ def _save_accepted_step(
         X_all=X_all_m,
         y_all=y,
         feature_names=feat_names,
+        reg_spec=reg_spec,
     )
 
 
@@ -312,7 +315,7 @@ def run_one_session(
 
     get_X_and_feats = _build_design_cache(data_dict)
 
-    X_full, feats_full = get_X_and_feats(VARS_ALL)
+    X_full, feats_full, reg_full = get_X_and_feats(VARS_ALL)
     save_full_fit_weights_for_all_neurons(
         out_root=OUT_ROOT,
         model_vars=VARS_ALL,
@@ -320,6 +323,7 @@ def run_one_session(
         feature_names=feats_full,
         Y_all=Y_all,
         folds_idx=folds_idx,
+        reg_spec=reg_full,
         n_jobs=N_JOBS,
     )
 

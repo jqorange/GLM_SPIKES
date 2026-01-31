@@ -115,7 +115,7 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     imu_df["pitch"] = np.mod(imu_df["pitch"].values, 2 * np.pi)
     imu_df["roll"] = np.mod(imu_df["roll"].values, 2 * np.pi)
 
-    pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
+    pos_idx, n_pos, pos_bins = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
@@ -127,6 +127,7 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "T": int(L),
         "position": pos_idx.astype(np.int32),
         "n_pos": int(n_pos),
+        "position_bins": pos_bins.astype(np.int32),
         "head_v": head_v.astype(np.float32),
         "head_v_bin": head_v_bin.astype(np.int32),
         "roll_bin": roll_bin.astype(np.int32),

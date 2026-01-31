@@ -20,7 +20,7 @@ def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
     return out.astype(np.int32)
 
 
-def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
+def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int, np.ndarray]:
     cell = float(POSITION_CELL_CM)
     x_bin = (np.asarray(head_x_cm, dtype=np.float32) // cell).astype(int)
     y_bin = (np.asarray(head_y_cm, dtype=np.float32) // cell).astype(int)
@@ -37,7 +37,8 @@ def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
         .merge(uniq, on=["x_bin", "y_bin"], how="left")["pos_idx"]
         .to_numpy(dtype=np.int32)
     )
-    return pos_idx, int(uniq.shape[0])
+    pos_bins = uniq[["x_bin", "y_bin"]].to_numpy(dtype=np.int32)
+    return pos_idx, int(uniq.shape[0]), pos_bins
 
 
 def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarray]) -> Tuple[sparse.csr_matrix, List[str]]:
@@ -98,4 +99,3 @@ def ensure_feature_mapping(model_dir: str, feature_names: List[str]):
 
 def model_key_from_vars(var_list: List[str]) -> str:
     return "_".join(var_list)
-
