@@ -21,16 +21,21 @@ from .config import (
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
+    SEGMENT_FRAMES_50HZ,
     VARS_ALL,
     WEIGHTS_BASE,
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
 from .io_utils import (
     apply_residual_speed,
+    base_session_name,
     filter_by_min_speed,
     load_spikes_50hz_counts,
     rebuild_inputs_50hz,
+    segment_frame_slices,
+    segment_session_name,
     session_paths,
+    slice_data_dict,
 )
 from .metrics import compute_llhi_bps_poisson, wilcoxon_greater
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
@@ -255,43 +260,34 @@ def _plot_selected_models(rows, OUT_ROOT: Path, session: str):
             continue
 
 
-def run_one_session(
+def _segment_done(out_root: Path) -> bool:
+    if (out_root / "_SUCCESS").exists():
+        return True
+    sel = out_root / "selected_models.csv"
+    if sel.exists():
+        try:
+            df = pd.read_csv(sel)
+            return df.shape[0] > 0
+        except Exception:
+            return False
+    return False
+
+
+def _run_one_segment(
     session: str,
-    use_residual_speed: bool = False,
-    weights_base: Path | None = None,
+    data_dict: Dict[str, np.ndarray],
+    Y_all: np.ndarray,
+    *,
+    weights_base: Path,
 ) -> Tuple[bool, str]:
-    if weights_base is None:
-        weights_base = WEIGHTS_BASE
     OUT_ROOT = weights_base / session
     (OUT_ROOT / "logs").mkdir(parents=True, exist_ok=True)
     (OUT_ROOT / "figures").mkdir(parents=True, exist_ok=True)
 
-    paths = session_paths(session)
-    for k in ["imu", "spike", "dlc_final", "position"]:
-        if not paths[k].exists():
-            return False, f"Missing input {k}: {paths[k]}"
-
-    data_dict = rebuild_inputs_50hz(session, paths)
-
-    Y50 = load_spikes_50hz_counts(paths["spike"])  # (T50_spk, N)
-    T_spk, N_NEURONS = Y50.shape
-
-    T_cov = int(data_dict["T"])
-    T = min(T_cov, T_spk)
-    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
-        return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
-
-    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
-        data_dict[k] = data_dict[k][:T]
-    Y_all = Y50[:T].astype(np.float64)
-    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
-    if speed_mask is not None and not speed_mask.any():
-        return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
-
-    if use_residual_speed:
-        data_dict = apply_residual_speed(data_dict)
-
     T = int(data_dict["T"])
+    if T < CV_FOLDS:
+        return False, f"Too few samples for {CV_FOLDS}-fold CV (T={T})"
+
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)
     folds_idx = list(kf.split(np.arange(T)))
 
@@ -310,7 +306,7 @@ def run_one_session(
 
     results = Parallel(n_jobs=N_JOBS, backend="loky")(
         delayed(_forward_select_one_neuron)(i, Y_all, folds_idx, OUT_ROOT, get_X_and_feats)
-        for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Poisson)")
+        for i in tqdm(range(Y_all.shape[1]), desc=f"{session} | forward search (Poisson)")
     )
 
     logs_dir = OUT_ROOT / "logs"
@@ -335,4 +331,75 @@ def run_one_session(
     with open(OUT_ROOT / "_SUCCESS", "w", encoding="utf-8") as f:
         f.write(f"OK\t{datetime.now().isoformat(timespec='seconds')}\n")
 
-    return True, f"OK (T50={T}, N={N_NEURONS})"
+    return True, f"OK (T50={T}, N={Y_all.shape[1]})"
+
+
+def run_one_session(
+    session: str,
+    use_residual_speed: bool = False,
+    weights_base: Path | None = None,
+) -> Tuple[bool, str]:
+    if weights_base is None:
+        weights_base = WEIGHTS_BASE
+    base_session = base_session_name(session)
+    paths = session_paths(base_session)
+    for k in ["imu", "spike", "dlc_final", "position"]:
+        if not paths[k].exists():
+            return False, f"Missing input {k}: {paths[k]}"
+
+    data_dict = rebuild_inputs_50hz(base_session, paths)
+
+    Y50 = load_spikes_50hz_counts(paths["spike"])  # (T50_spk, N)
+    T_spk, N_NEURONS = Y50.shape
+
+    T_cov = int(data_dict["T"])
+    T = min(T_cov, T_spk)
+    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
+        return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
+
+    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+        data_dict[k] = data_dict[k][:T]
+    Y_all = Y50[:T].astype(np.float64)
+    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
+    if speed_mask is not None and not speed_mask.any():
+        return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
+
+    segments = segment_frame_slices(T, SEGMENT_FRAMES_50HZ)
+    if not segments:
+        return False, f"No full segments (segment_frames={SEGMENT_FRAMES_50HZ}, T={T})"
+
+    statuses = []
+    processed = 0
+    skipped = 0
+    for seg_idx, (start, end) in enumerate(segments, start=1):
+        segment_name = segment_session_name(base_session, seg_idx)
+        out_root = weights_base / segment_name
+        if _segment_done(out_root):
+            statuses.append((segment_name, start, end, "already_done"))
+            skipped += 1
+            continue
+        seg_data = slice_data_dict(data_dict, start, end)
+        seg_Y = Y_all[start:end].astype(np.float64)
+        seg_data, seg_Y, speed_mask = filter_by_min_speed(seg_data, seg_Y, MIN_SPEED_CM_S)
+        if speed_mask is not None and not speed_mask.any():
+            statuses.append((segment_name, start, end, "skip_min_speed"))
+            skipped += 1
+            continue
+        if use_residual_speed:
+            seg_data = apply_residual_speed(seg_data)
+
+        ok, msg = _run_one_segment(segment_name, seg_data, seg_Y, weights_base=weights_base)
+        statuses.append((segment_name, start, end, "done" if ok else f"skip_{msg}"))
+        if ok:
+            processed += 1
+        else:
+            skipped += 1
+
+    summary_dir = weights_base / base_session
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    status_df = pd.DataFrame(statuses, columns=["segment", "start_frame", "end_frame", "status"])
+    status_df.to_csv(summary_dir / "segments_status.csv", index=False)
+    with open(summary_dir / "_SEGMENTS_SUCCESS", "w", encoding="utf-8") as f:
+        f.write(f"OK\tprocessed={processed}\tskipped={skipped}\n")
+
+    return True, f"Segments processed={processed}, skipped={skipped}, total={len(segments)}"

@@ -1,4 +1,5 @@
-from typing import Dict, Tuple
+import re
+from typing import Dict, List, Tuple
 
 import h5py
 import numpy as np
@@ -57,6 +58,7 @@ def list_sessions_position(root):
 
 
 def session_paths(session: str) -> Dict[str, object]:
+    session = base_session_name(session)
     return {
         "imu": IMU_ROOT / session / f"{session}_IMU_features.csv",
         "spike": SPIKE_ROOT / f"{session}_200Hz.h5",
@@ -65,10 +67,45 @@ def session_paths(session: str) -> Dict[str, object]:
     }
 
 
+_SEGMENT_SUFFIX_RE = re.compile(r"_seg\d+$", flags=re.IGNORECASE)
+
+
+def base_session_name(session: str) -> str:
+    return _SEGMENT_SUFFIX_RE.sub("", str(session))
+
+
+def segment_session_name(session: str, segment_index: int) -> str:
+    return f"{base_session_name(session)}_seg{segment_index:02d}"
+
+
+def segment_frame_slices(total_frames: int, segment_frames: int) -> List[Tuple[int, int]]:
+    if segment_frames <= 0 or total_frames <= 0:
+        return []
+    n_full = total_frames // segment_frames
+    return [(i * segment_frames, (i + 1) * segment_frames) for i in range(n_full)]
+
+
+def slice_data_dict(data_dict: Dict[str, np.ndarray], start: int, end: int) -> Dict[str, np.ndarray]:
+    if start < 0 or end <= start:
+        raise ValueError(f"Invalid slice range: start={start}, end={end}")
+    total_len = int(data_dict.get("T", 0))
+    sliced: Dict[str, np.ndarray] = {}
+    for k, v in data_dict.items():
+        if isinstance(v, np.ndarray) and v.shape[0] == total_len:
+            sliced[k] = v[start:end]
+        else:
+            sliced[k] = v
+    sliced["T"] = int(end - start)
+    return sliced
+
+
 def is_session_done(session: str, weights_base) -> bool:
     out_dir = weights_base / session
     if not out_dir.exists():
-        return False
+        base_dir = weights_base / base_session_name(session)
+        return (base_dir / "_SEGMENTS_SUCCESS").exists()
+    if (out_dir / "_SEGMENTS_SUCCESS").exists():
+        return True
     if (out_dir / "_SUCCESS").exists():
         return True
     sel = out_dir / "selected_models.csv"

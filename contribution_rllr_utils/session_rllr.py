@@ -18,12 +18,14 @@ from glm_poisson_forward.config import (
     N_JOBS,
     POSITION_ROOT,
     SEED,
+    SEGMENT_FRAMES_50HZ,
     SPIKE_ROOT,
     VARS_ALL,
     WEIGHTS_BASE,
 )
 from glm_poisson_forward.design_matrix import build_design_matrix, model_key_from_vars as forward_model_key
 from glm_poisson_forward.io_utils import (
+    base_session_name,
     filter_by_min_speed,
     list_sessions_dlc_final,
     list_sessions_imu,
@@ -31,7 +33,10 @@ from glm_poisson_forward.io_utils import (
     list_sessions_spike,
     load_spikes_50hz_counts,
     rebuild_inputs_50hz,
+    segment_frame_slices,
+    segment_session_name,
     session_paths,
+    slice_data_dict,
 )
 from glm_poisson_forward.metrics import compute_llhi_bps_poisson
 
@@ -134,53 +139,22 @@ def ensure_z_pvalue_columns(
     return updated
 
 
-def compute_session_rllr(
+def _compute_session_rllr_core(
     session: str,
-    dayid2cellinfo: Dict[str, Path],
+    group: str,
+    data_dict: Dict[str, np.ndarray],
+    Y_all: np.ndarray,
+    pyr_idx: np.ndarray,
     *,
     n_jobs: int = N_JOBS,
     n_shuffle: int = 200,
 ) -> Optional[SessionResult]:
-
     sess_dir = WEIGHTS_BASE / session
     sess_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = session_paths(session)
-    for k in ["imu", "spike", "dlc_final", "position"]:
-        if not paths[k].exists():
-            print(f"[SKIP] {session}: missing input {k}: {paths[k]}")
-            return None
-
-    s_lower = session.lower()
-    if "indoor" in s_lower:
-        group = "indoor"
-    elif "outdoor" in s_lower:
-        group = "outdoor"
-    else:
-        print(f"[SKIP] {session}: cannot infer indoor/outdoor from name")
-        return None
-
-    data_dict = rebuild_inputs_50hz(session, paths)
-    Y50 = load_spikes_50hz_counts(paths["spike"])
-    T_spk, N_NEURONS = Y50.shape
-    T_cov = int(data_dict["T"])
-    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
-        print(f"[SKIP] {session}: length mismatch @50Hz cov={T_cov} spk={T_spk}")
-        return None
-
-    T = min(T_cov, T_spk)
-    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
-        data_dict[k] = data_dict[k][:T]
-    Y_all = Y50[:T].astype(np.float64)
-    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
-    if speed_mask is not None and not speed_mask.any():
-        print(f"[SKIP] {session}: no samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
-        return None
     T = int(data_dict["T"])
-
-    pyr_idx = pyramidal_indices_for_session(session, dayid2cellinfo, N_NEURONS)
-    if pyr_idx is None or pyr_idx.size == 0:
-        print(f"[SKIP] {session}: pyramidal cell info not found or empty")
+    if T < CV_FOLDS:
+        print(f"[SKIP] {session}: too few samples for {CV_FOLDS}-fold CV (T={T})")
         return None
 
     selected_models = load_forward_selected_models(sess_dir)
@@ -697,3 +671,133 @@ def compute_session_rllr(
         pyramidal_neurons=pyr_idx,
         unfit_neurons=sorted(set(unfit_neurons)),
     )
+
+
+def compute_session_rllr(
+    session: str,
+    dayid2cellinfo: Dict[str, Path],
+    *,
+    n_jobs: int = N_JOBS,
+    n_shuffle: int = 200,
+) -> Optional[SessionResult]:
+    base_session = base_session_name(session)
+    sess_dir = WEIGHTS_BASE / session
+    sess_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = session_paths(base_session)
+    for k in ["imu", "spike", "dlc_final", "position"]:
+        if not paths[k].exists():
+            print(f"[SKIP] {session}: missing input {k}: {paths[k]}")
+            return None
+
+    s_lower = base_session.lower()
+    if "indoor" in s_lower:
+        group = "indoor"
+    elif "outdoor" in s_lower:
+        group = "outdoor"
+    else:
+        print(f"[SKIP] {session}: cannot infer indoor/outdoor from name")
+        return None
+
+    data_dict = rebuild_inputs_50hz(base_session, paths)
+    Y50 = load_spikes_50hz_counts(paths["spike"])
+    T_spk, N_NEURONS = Y50.shape
+    T_cov = int(data_dict["T"])
+    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
+        print(f"[SKIP] {session}: length mismatch @50Hz cov={T_cov} spk={T_spk}")
+        return None
+
+    T = min(T_cov, T_spk)
+    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+        data_dict[k] = data_dict[k][:T]
+    Y_all = Y50[:T].astype(np.float64)
+    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
+    if speed_mask is not None and not speed_mask.any():
+        print(f"[SKIP] {session}: no samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
+        return None
+
+    pyr_idx = pyramidal_indices_for_session(base_session, dayid2cellinfo, N_NEURONS)
+    if pyr_idx is None or pyr_idx.size == 0:
+        print(f"[SKIP] {session}: pyramidal cell info not found or empty")
+        return None
+
+    return _compute_session_rllr_core(
+        session=session,
+        group=group,
+        data_dict=data_dict,
+        Y_all=Y_all,
+        pyr_idx=pyr_idx,
+        n_jobs=n_jobs,
+        n_shuffle=n_shuffle,
+    )
+
+
+def compute_session_rllr_segments(
+    session: str,
+    dayid2cellinfo: Dict[str, Path],
+    *,
+    n_jobs: int = N_JOBS,
+    n_shuffle: int = 200,
+) -> List[SessionResult]:
+    base_session = base_session_name(session)
+    paths = session_paths(base_session)
+    for k in ["imu", "spike", "dlc_final", "position"]:
+        if not paths[k].exists():
+            print(f"[SKIP] {base_session}: missing input {k}: {paths[k]}")
+            return []
+
+    s_lower = base_session.lower()
+    if "indoor" in s_lower:
+        group = "indoor"
+    elif "outdoor" in s_lower:
+        group = "outdoor"
+    else:
+        print(f"[SKIP] {base_session}: cannot infer indoor/outdoor from name")
+        return []
+
+    data_dict = rebuild_inputs_50hz(base_session, paths)
+    Y50 = load_spikes_50hz_counts(paths["spike"])
+    T_spk, N_NEURONS = Y50.shape
+    T_cov = int(data_dict["T"])
+    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
+        print(f"[SKIP] {base_session}: length mismatch @50Hz cov={T_cov} spk={T_spk}")
+        return []
+
+    T = min(T_cov, T_spk)
+    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+        data_dict[k] = data_dict[k][:T]
+    Y_all = Y50[:T].astype(np.float64)
+
+    segments = segment_frame_slices(T, SEGMENT_FRAMES_50HZ)
+    if not segments:
+        print(f"[SKIP] {base_session}: no full 10-min segments (T={T}, segment={SEGMENT_FRAMES_50HZ})")
+        return []
+
+    pyr_idx = pyramidal_indices_for_session(base_session, dayid2cellinfo, N_NEURONS)
+    if pyr_idx is None or pyr_idx.size == 0:
+        print(f"[SKIP] {base_session}: pyramidal cell info not found or empty")
+        return []
+
+    results: List[SessionResult] = []
+    for seg_idx, (start, end) in enumerate(segments, start=1):
+        segment_name = segment_session_name(base_session, seg_idx)
+        seg_data = slice_data_dict(data_dict, start, end)
+        seg_Y = Y_all[start:end].astype(np.float64)
+        seg_data, seg_Y, speed_mask = filter_by_min_speed(seg_data, seg_Y, MIN_SPEED_CM_S)
+        if speed_mask is not None and not speed_mask.any():
+            print(f"[SKIP] {segment_name}: no samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
+            continue
+
+        r = _compute_session_rllr_core(
+            session=segment_name,
+            group=group,
+            data_dict=seg_data,
+            Y_all=seg_Y,
+            pyr_idx=pyr_idx,
+            n_jobs=n_jobs,
+            n_shuffle=n_shuffle,
+        )
+        if r is not None:
+            results.append(r)
+
+    return results

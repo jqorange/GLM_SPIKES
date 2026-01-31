@@ -135,6 +135,7 @@ def infer_group(session_name: str) -> Optional[str]:
 
 def base_session_id(session_name: str) -> str:
     base = re.sub(r"[_-]?(indoor|outdoor)$", "", session_name, flags=re.IGNORECASE)
+    base = re.sub(r"_seg\d+$", "", base, flags=re.IGNORECASE)
     return base if base else session_name
 
 

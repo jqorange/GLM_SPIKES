@@ -25,6 +25,11 @@ BASE_FS = 200.0
 AGG_FACTOR = int(BASE_FS / FS_HZ)  # 4
 MAX_MISMATCH_FRAMES_50HZ = 5  # tolerance in 50 Hz frames
 
+# Segment definitions (10-min segments at 50 Hz)
+SEGMENT_MINUTES = 10
+SEGMENT_SECONDS = SEGMENT_MINUTES * 60
+SEGMENT_FRAMES_50HZ = int(FS_HZ * SEGMENT_SECONDS)
+
 # Forward-selection test threshold
 ALPHA = 0.05
 

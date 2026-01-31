@@ -32,7 +32,7 @@ from contribution_rllr_utils import (
     hierarchical_bootstrap_mean,
     plot_dropone_suite,
     plot_summary_figure,
-    compute_session_rllr,
+    compute_session_rllr_segments,
     list_required_sessions,
     SessionResult,
     build_dayid_to_cellinfo,
@@ -438,12 +438,14 @@ def main():
     results: List[SessionResult] = []
     for s in sessions:
         try:
-            r = compute_session_rllr(s, dayid2cellinfo, n_jobs=N_JOBS, n_shuffle=N_SHUFFLE)
+            seg_results = compute_session_rllr_segments(
+                s, dayid2cellinfo, n_jobs=N_JOBS, n_shuffle=N_SHUFFLE
+            )
         except Exception as e:  # pylint: disable=broad-except
             print(f"[SKIP] {s}: exception {e}")
-            r = None
-        if r is not None:
-            results.append(r)
+            seg_results = []
+        if seg_results:
+            results.extend(seg_results)
 
     if not results:
         print("[FATAL] No sessions processed successfully.")

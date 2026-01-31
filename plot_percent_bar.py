@@ -179,6 +179,7 @@ def _pair_id_from_session_name(session_name: str) -> str:
     """
     s = session_name.lower()
     s = s.replace("indoor", "").replace("outdoor", "")
+    s = re.sub(r"_seg\d+$", "", s)
     s = re.sub(r"__+", "_", s)
     s = re.sub(r"[-\s]+", "_", s)
     s = s.strip("_")
