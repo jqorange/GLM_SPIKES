@@ -14,7 +14,7 @@ from .plotting import (
     plot_summary_figure,
 )
 from .selection import load_forward_selected_models
-from .stats import build_oof_intercept_mu, hierarchical_bootstrap_mean, poisson_loglik
+from .stats import bernoulli_loglik, build_oof_intercept_prob, hierarchical_bootstrap_mean
 from .session_rllr import SessionResult, compute_session_rllr, list_required_sessions
 from .weights import (
     load_feature_names_file,
@@ -43,9 +43,9 @@ __all__ = [
     "plot_dropone_suite",
     "plot_summary_figure",
     "load_forward_selected_models",
-    "build_oof_intercept_mu",
+    "build_oof_intercept_prob",
     "hierarchical_bootstrap_mean",
-    "poisson_loglik",
+    "bernoulli_loglik",
     "SessionResult",
     "compute_session_rllr",
     "list_required_sessions",

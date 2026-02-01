@@ -13,7 +13,7 @@ from glm_poisson_forward.config import (
     CV_FOLDS,
     DLC_ROOT,
     IMU_ROOT,
-    MAX_MISMATCH_FRAMES_50HZ,
+    MAX_MISMATCH_FRAMES_200HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
     POSITION_ROOT,
@@ -29,15 +29,15 @@ from glm_poisson_forward.io_utils import (
     list_sessions_imu,
     list_sessions_position,
     list_sessions_spike,
-    load_spikes_50hz_counts,
-    rebuild_inputs_50hz,
+    load_spikes_200hz_binary,
+    rebuild_inputs_200hz,
     session_paths,
 )
-from glm_poisson_forward.metrics import compute_llhi_bps_poisson
+from glm_poisson_forward.metrics import compute_llr_per_spike_bernoulli
 
 from .constants import MU_EPS, RLLR_FITS_DIRNAME, RLLR_STATS_DIRNAME
 from .selection import load_forward_selected_models
-from .stats import build_oof_intercept_mu, poisson_loglik
+from .stats import bernoulli_loglik, build_oof_intercept_prob
 from .weights import (
     load_feature_names_file,
     load_fold_weights,
@@ -160,18 +160,18 @@ def compute_session_rllr(
         print(f"[SKIP] {session}: cannot infer indoor/outdoor from name")
         return None
 
-    data_dict = rebuild_inputs_50hz(session, paths)
-    Y50 = load_spikes_50hz_counts(paths["spike"])
-    T_spk, N_NEURONS = Y50.shape
+    data_dict = rebuild_inputs_200hz(session, paths)
+    Y200 = load_spikes_200hz_binary(paths["spike"])
+    T_spk, N_NEURONS = Y200.shape
     T_cov = int(data_dict["T"])
-    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
-        print(f"[SKIP] {session}: length mismatch @50Hz cov={T_cov} spk={T_spk}")
+    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_200HZ:
+        print(f"[SKIP] {session}: length mismatch @200Hz cov={T_cov} spk={T_spk}")
         return None
 
     T = min(T_cov, T_spk)
     for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
         data_dict[k] = data_dict[k][:T]
-    Y_all = Y50[:T].astype(np.float64)
+    Y_all = Y200[:T].astype(np.float64)
     data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
     if speed_mask is not None and not speed_mask.any():
         print(f"[SKIP] {session}: no samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
@@ -406,10 +406,10 @@ def compute_session_rllr(
             continue
         y = Y_all[:, ni].astype(np.float64)
         mu0_oof = None
-        if need_rllr or need_rllr_shuffle:
-            mu0_oof = build_oof_intercept_mu(y, folds_idx)
+        if need_rllr or need_rllr_shuffle or need_llhi or need_llhi_shuffle:
+            mu0_oof = build_oof_intercept_prob(y, folds_idx)
             if need_rllr:
-                ll0 = poisson_loglik(y, mu0_oof)
+                ll0 = bernoulli_loglik(y, mu0_oof)
                 ll0_by_neuron[ni] = float(ll0)
 
         X_full, feats_full, mk_full = get_X(full_vars)
@@ -430,7 +430,7 @@ def compute_session_rllr(
             continue
         ll_full = None
         if need_rllr:
-            ll_full = poisson_loglik(y, mu_oof_full)
+            ll_full = bernoulli_loglik(y, mu_oof_full)
             ll_full_by_neuron[ni] = float(ll_full)
             ll_gain = float(ll_full - ll0_by_neuron[ni])
             full_ll_gain_by_neuron[ni] = ll_gain
@@ -438,7 +438,7 @@ def compute_session_rllr(
                 unfit_neurons.append(ni)
                 continue
         if need_llhi:
-            llhi_full = compute_llhi_bps_poisson(y, mu_oof_full)
+            llhi_full = compute_llr_per_spike_bernoulli(y, mu_oof_full, mu0_oof)
             full_llhi_by_neuron[ni] = float(llhi_full)
         full_processed += 1
 
@@ -485,18 +485,18 @@ def compute_session_rllr(
                 ll_full_shuf = np.nan
                 denom_shuf = np.nan
                 if need_llhi_shuffle:
-                    llhi_full_shuf = compute_llhi_bps_poisson(y_shuf, mu_oof_full)
+                    llhi_full_shuf = compute_llr_per_spike_bernoulli(y_shuf, mu_oof_full, mu0_oof)
                 if need_rllr_shuffle and mu0_oof is not None:
-                    ll0_shuf = poisson_loglik(y_shuf, mu0_oof)
-                    ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
+                    ll0_shuf = bernoulli_loglik(y_shuf, mu0_oof)
+                    ll_full_shuf = bernoulli_loglik(y_shuf, mu_oof_full)
                     denom_shuf = ll_full_shuf - ll0_shuf
 
                 for v, mu_red in mu_oof_red_by_feat.items():
                     if need_llhi_shuffle:
-                        llhi_red_shuf = compute_llhi_bps_poisson(y_shuf, mu_red)
+                        llhi_red_shuf = compute_llr_per_spike_bernoulli(y_shuf, mu_red, mu0_oof)
                         shuf_llhi_vals[v].append(float(llhi_full_shuf - llhi_red_shuf))
                     if need_rllr_shuffle and np.isfinite(denom_shuf) and denom_shuf > MU_EPS:
-                        ll_red_shuf = poisson_loglik(y_shuf, mu_red)
+                        ll_red_shuf = bernoulli_loglik(y_shuf, mu_red)
                         if np.isfinite(ll_red_shuf) and np.isfinite(ll_full_shuf):
                             shuf_rllr_vals[v].append(float((ll_full_shuf - ll_red_shuf) / denom_shuf))
 
@@ -527,12 +527,12 @@ def compute_session_rllr(
                 if denom <= 0 or not np.isfinite(denom) or ll_full is None:
                     contrib_rllr[v][ni] = float("nan")
                 else:
-                    ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
+                    ll_red = bernoulli_loglik(y, mu_oof_red_by_feat[v])
                     contrib_rllr[v][ni] = float((ll_full - ll_red) / denom)
 
             if need_llhi:
                 llhi_full = full_llhi_by_neuron.get(ni, float("nan"))
-                llhi_red = compute_llhi_bps_poisson(y, mu_oof_red_by_feat[v])
+                llhi_red = compute_llr_per_spike_bernoulli(y, mu_oof_red_by_feat[v], mu0_oof)
                 if not np.isfinite(llhi_full) or not np.isfinite(llhi_red):
                     contrib_delta_llhi[v][ni] = float("nan")
                 else:

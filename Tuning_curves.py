@@ -7,11 +7,11 @@ Goal
 Only read FULL_FIT GLM coefficients (10-fold averaged) and plot model-based tuning curves.
 No IMU/DLC/Position raw inputs are used.
 
-Model-based tuning (Poisson GLM, log link)
-------------------------------------------
+Model-based tuning (Bernoulli GLM, logit link)
+----------------------------------------------
 eta = intercept + sum_v effect_v[bin_v]
-lambda(count per bin) = exp(eta)
-rate(spikes/s) = exp(eta) / BIN_SEC
+p(spike in bin) = sigmoid(eta)
+rate(spikes/s) = sigmoid(eta) / BIN_SEC
 
 Baseline (no raw data available)
 -------------------------------
@@ -430,7 +430,8 @@ def _compute_curve_rate(var: str, intercept: float, effects: Dict[str, np.ndarra
 
     base_eta = _baseline_eta(intercept, effects, target_var=var)
     eta = base_eta + eff
-    rate = np.exp(eta) / BIN_SEC  # spikes/s
+    rate = 1.0 / (1.0 + np.exp(-eta))
+    rate = rate / BIN_SEC  # spikes/s
 
     if SMOOTH_SIGMA_BINS is not None and float(SMOOTH_SIGMA_BINS) > 0:
         circular = var in {"roll", "yaw"}

@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.linear_model import PoissonRegressor
+from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
 
-from glm_poisson_forward.config import CV_FOLDS, MAX_ITER, POISSON_ALPHA
+from glm_poisson_forward.config import CV_FOLDS, LOGISTIC_C, MAX_ITER
 
 from .constants import MU_EPS
 
@@ -65,14 +65,21 @@ def fit_one_fold_weights(
     ytr = y_all[tr_idx].astype(np.float64)
 
     mean_tr = float(np.mean(ytr))
-    if mean_tr <= 0:
+    mean_tr = float(np.clip(mean_tr, MU_EPS, 1.0 - MU_EPS))
+    if mean_tr <= MU_EPS or mean_tr >= 1.0 - MU_EPS:
         w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
-        w[-1] = np.log(MU_EPS)
+        w[-1] = float(np.log(mean_tr / (1.0 - mean_tr)))
         return w
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
+    mdl = LogisticRegression(
+        C=LOGISTIC_C,
+        max_iter=MAX_ITER,
+        fit_intercept=True,
+        solver="saga",
+    )
     mdl.fit(Xtr, ytr)
-    w = np.concatenate([mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)])
+    intercept = float(np.ravel(mdl.intercept_)[0])
+    w = np.concatenate([mdl.coef_.ravel().astype(np.float32), np.array([intercept], dtype=np.float32)])
     return w
 
 
@@ -252,8 +259,8 @@ def predict_oof_from_saved_weights(
 
         Xva = X_all[va]
         eta = (Xva @ coef).astype(np.float64) + float(intercept)
-        mu_va = np.exp(eta)
-        mu_va = np.clip(mu_va, MU_EPS, None)
+        mu_va = 1.0 / (1.0 + np.exp(-eta))
+        mu_va = np.clip(mu_va, MU_EPS, 1.0 - MU_EPS)
         mu_oof[va] = mu_va
 
     if np.any(~np.isfinite(mu_oof)):

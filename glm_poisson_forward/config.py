@@ -19,18 +19,19 @@ SEED = 0
 CV_FOLDS = 10
 
 # Bin definitions
-BIN_MS = 20
-FS_HZ = 50.0
+BIN_MS = 5
+FS_HZ = 200.0
 BASE_FS = 200.0
-AGG_FACTOR = int(BASE_FS / FS_HZ)  # 4
-MAX_MISMATCH_FRAMES_50HZ = 5  # tolerance in 50 Hz frames
+COV_FS_HZ = 50.0
+UPSAMPLE_FACTOR = int(FS_HZ / COV_FS_HZ)  # 4
+MAX_MISMATCH_FRAMES_200HZ = 20  # tolerance in 200 Hz frames
 
 # Forward-selection test threshold
 ALPHA = 0.05
 
-# PoissonRegressor params
+# Bernoulli (logistic) params
 MAX_ITER = 500
-POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
+LOGISTIC_C = 1e6  # inverse of regularization strength (large C -> weak regularization)
 
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
