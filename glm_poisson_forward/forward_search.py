@@ -8,12 +8,13 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.model_selection import KFold
 from tqdm import tqdm
 
 from .config import (
     ALPHA,
     CV_FOLDS,
+    CV_BLOCK_SEC,
+    FS_HZ,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
@@ -25,6 +26,7 @@ from .config import (
     WEIGHTS_BASE,
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
+from .cv_utils import build_block_folds
 from .io_utils import (
     apply_residual_speed,
     filter_by_min_speed,
@@ -292,8 +294,11 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
-    kf = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx = list(kf.split(np.arange(T)))
+    block_size = max(1, int(round(CV_BLOCK_SEC * FS_HZ)))
+    try:
+        folds_idx = build_block_folds(T, block_size, CV_FOLDS)
+    except ValueError as exc:
+        return False, f"Block CV error: {exc}"
 
     get_X_and_feats = _build_design_cache(data_dict)
 

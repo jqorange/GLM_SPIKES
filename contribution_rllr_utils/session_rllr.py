@@ -7,11 +7,12 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
 
 from glm_poisson_forward.config import (
+    CV_BLOCK_SEC,
     CV_FOLDS,
     DLC_ROOT,
+    FS_HZ,
     IMU_ROOT,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
@@ -22,6 +23,7 @@ from glm_poisson_forward.config import (
     VARS_ALL,
     WEIGHTS_BASE,
 )
+from glm_poisson_forward.cv_utils import build_block_folds
 from glm_poisson_forward.design_matrix import build_design_matrix, model_key_from_vars as forward_model_key
 from glm_poisson_forward.io_utils import (
     filter_by_min_speed,
@@ -198,8 +200,9 @@ def compute_session_rllr(
         f"with forward-selected models={len(pyr_models)}",
     )
 
-    kf = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx = list(kf.split(np.arange(T)))
+    block_size = max(1, int(round(CV_BLOCK_SEC * FS_HZ)))
+    folds_idx = build_block_folds(T, block_size, CV_FOLDS)
+    folds_count = len(folds_idx)
 
     X_cache: Dict[str, Tuple[np.ndarray, List[str], str]] = {}
 
@@ -224,7 +227,7 @@ def compute_session_rllr(
         neuron_dir = model_dir / f"neuron_{idx1}"
         if not neuron_dir.exists():
             return False
-        for k in range(1, CV_FOLDS + 1):
+        for k in range(1, folds_count + 1):
             csv_path = neuron_dir / f"fold{k}" / "weights.csv"
             if (not csv_path.exists()) or csv_path.stat().st_size < 8:
                 return False
@@ -235,7 +238,7 @@ def compute_session_rllr(
                 return False
             try:
                 weights = []
-                for k in range(1, CV_FOLDS + 1):
+                for k in range(1, folds_count + 1):
                     csv_path = neuron_dir / f"fold{k}" / "weights.csv"
                     weights.append(load_fold_weights(csv_path, feature_names=saved_feats))
                 w_mean = np.mean(np.stack(weights, axis=0), axis=0).astype(np.float32)
