@@ -3,14 +3,14 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
-from glm_poisson_forward.config import DLC_ROOT, IMU_ROOT, POSITION_ROOT, SPIKE_ROOT
+from glm_poisson_forward.config import DLC_ROOT, IMU_ROOT, POSITION_ROOT, SPIKE_ROOT, UPSAMPLE_FACTOR
 from glm_poisson_forward.io_utils import (
     list_sessions_dlc_final,
     list_sessions_imu,
     list_sessions_position,
     list_sessions_spike,
 )
-from glm_poisson_forward.io_utils import load_spikes_50hz_counts
+from glm_poisson_forward.io_utils import load_spikes_200hz_binary
 
 
 def list_sessions_all() -> list[str]:
@@ -45,29 +45,36 @@ def load_session_raw(session: str) -> Dict[str, np.ndarray]:
     heading_rad = np.deg2rad(heading_deg)
     heading_rad = np.mod(heading_rad, 2 * np.pi)
 
-    spikes_50hz = load_spikes_50hz_counts(paths["spike"])
-    if spikes_50hz.shape[0] < L:
-        L = spikes_50hz.shape[0]
+    spikes_200hz = load_spikes_200hz_binary(paths["spike"])
+    T_cov = int(L * UPSAMPLE_FACTOR)
+    if spikes_200hz.shape[0] < T_cov:
+        L = spikes_200hz.shape[0] // UPSAMPLE_FACTOR
         pos_df = pos_df.iloc[:L].reset_index(drop=True)
         dlc_df = dlc_df.iloc[:L].reset_index(drop=True)
         imu_df = imu_df.iloc[:L].reset_index(drop=True)
         heading_rad = heading_rad[:L]
         heading_deg = heading_deg[:L]
-    elif spikes_50hz.shape[0] > L:
-        spikes_50hz = spikes_50hz[:L]
+        T_cov = int(L * UPSAMPLE_FACTOR)
+    elif spikes_200hz.shape[0] > T_cov:
+        spikes_200hz = spikes_200hz[:T_cov]
 
     imu_df["yaw"] = heading_rad
     imu_df["roll"] = np.mod(imu_df["roll"].values, 2 * np.pi)
     imu_df["pitch"] = np.mod(imu_df["pitch"].values, 2 * np.pi)
 
+    def _upsample(arr: np.ndarray) -> np.ndarray:
+        if UPSAMPLE_FACTOR <= 1:
+            return arr
+        return np.repeat(arr, UPSAMPLE_FACTOR, axis=0)
+
     return {
-        "T": int(L),
-        "head_x": pos_df["head_x"].to_numpy(dtype=np.float32),
-        "head_y": pos_df["head_y"].to_numpy(dtype=np.float32),
-        "heading_rad": heading_rad.astype(np.float32),
-        "heading_deg": heading_deg.astype(np.float32),
-        "head_v": dlc_df["head_v"].to_numpy(dtype=np.float32),
-        "roll": imu_df["roll"].to_numpy(dtype=np.float32),
-        "pitch": imu_df["pitch"].to_numpy(dtype=np.float32),
-        "spikes": spikes_50hz.astype(np.int32),
+        "T": int(T_cov),
+        "head_x": _upsample(pos_df["head_x"].to_numpy(dtype=np.float32)),
+        "head_y": _upsample(pos_df["head_y"].to_numpy(dtype=np.float32)),
+        "heading_rad": _upsample(heading_rad.astype(np.float32)),
+        "heading_deg": _upsample(heading_deg.astype(np.float32)),
+        "head_v": _upsample(dlc_df["head_v"].to_numpy(dtype=np.float32)),
+        "roll": _upsample(imu_df["roll"].to_numpy(dtype=np.float32)),
+        "pitch": _upsample(imu_df["pitch"].to_numpy(dtype=np.float32)),
+        "spikes": spikes_200hz.astype(np.int32),
     }

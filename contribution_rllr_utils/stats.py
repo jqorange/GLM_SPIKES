@@ -1,25 +1,24 @@
 from typing import Dict, Tuple
 
 import numpy as np
-from scipy.special import gammaln
-
 from .constants import CI_HI, CI_LO, MU_EPS, N_BOOT
 
 
-def poisson_loglik(y: np.ndarray, mu: np.ndarray) -> float:
+def bernoulli_loglik(y: np.ndarray, p: np.ndarray) -> float:
     y = np.asarray(y, dtype=np.float64).ravel()
-    mu = np.asarray(mu, dtype=np.float64).ravel()
-    mu = np.clip(mu, MU_EPS, None)
-    return float(np.sum(y * np.log(mu) - mu - gammaln(y + 1.0)))
+    p = np.asarray(p, dtype=np.float64).ravel()
+    p = np.clip(p, MU_EPS, 1.0 - MU_EPS)
+    return float(np.sum(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
-def build_oof_intercept_mu(y: np.ndarray, folds_idx) -> np.ndarray:
+def build_oof_intercept_prob(y: np.ndarray, folds_idx) -> np.ndarray:
     y = np.asarray(y, dtype=np.float64).ravel()
-    mu_oof = np.full_like(y, MU_EPS, dtype=np.float64)
+    p_oof = np.full_like(y, MU_EPS, dtype=np.float64)
     for tr, va in folds_idx:
         mean_tr = float(np.mean(y[tr]))
-        mu_oof[va] = max(mean_tr, MU_EPS)
-    return mu_oof
+        mean_tr = float(np.clip(mean_tr, MU_EPS, 1.0 - MU_EPS))
+        p_oof[va] = mean_tr
+    return p_oof
 
 
 def hierarchical_bootstrap_mean(

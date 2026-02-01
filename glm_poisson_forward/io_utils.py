@@ -5,13 +5,13 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    AGG_FACTOR,
     ANGLE_N_BINS,
     DLC_ROOT,
     IMU_ROOT,
     POSITION_ROOT,
     SPEED_N_BINS,
     SPIKE_ROOT,
+    UPSAMPLE_FACTOR,
 )
 from .design_matrix import bin_col, build_position_index
 
@@ -82,21 +82,18 @@ def is_session_done(session: str, weights_base) -> bool:
     return False
 
 
-def load_spikes_50hz_counts(h5_path) -> np.ndarray:
+def load_spikes_200hz_binary(h5_path) -> np.ndarray:
     with h5py.File(h5_path, "r") as hf:
-        Y200 = hf["spike_binary"][:].astype(np.int16)  # (T200, N)
+        Y200 = hf["spike_binary"][:].astype(np.int8)  # (T200, N)
 
-    T200, N = Y200.shape
-    T200_trim = (T200 // AGG_FACTOR) * AGG_FACTOR
-    if T200_trim <= 0:
-        raise ValueError("Spike length too short after trimming.")
+    if Y200.ndim != 2:
+        raise ValueError("Spike array should have shape (T, N).")
 
-    Y200 = Y200[:T200_trim]
-    Y50 = Y200.reshape(-1, AGG_FACTOR, N).sum(axis=1)  # (T50, N)
-    return Y50.astype(np.int32)
+    Y200 = (Y200 > 0).astype(np.int8)
+    return Y200
 
 
-def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.ndarray]:
+def rebuild_inputs_200hz(session: str, paths: Dict[str, object]) -> Dict[str, np.ndarray]:
     pos_df = pd.read_csv(paths["position"], usecols=["head_x", "head_y", "heading_deg"]).astype(np.float32)
     dlc_df = pd.read_csv(paths["dlc_final"], usecols=["head_v"]).astype(np.float32)
     imu_df = pd.read_csv(paths["imu"], usecols=["roll", "yaw", "pitch"]).astype(np.float32)
@@ -123,15 +120,20 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
 
+    def _upsample(arr: np.ndarray) -> np.ndarray:
+        if UPSAMPLE_FACTOR <= 1:
+            return arr
+        return np.repeat(arr, UPSAMPLE_FACTOR, axis=0)
+
     return {
-        "T": int(L),
-        "position": pos_idx.astype(np.int32),
+        "T": int(L * UPSAMPLE_FACTOR),
+        "position": _upsample(pos_idx.astype(np.int32)),
         "n_pos": int(n_pos),
-        "head_v": head_v.astype(np.float32),
-        "head_v_bin": head_v_bin.astype(np.int32),
-        "roll_bin": roll_bin.astype(np.int32),
-        "yaw_bin": yaw_bin.astype(np.int32),
-        "pitch_bin": pitch_bin.astype(np.int32),
+        "head_v": _upsample(head_v.astype(np.float32)),
+        "head_v_bin": _upsample(head_v_bin.astype(np.int32)),
+        "roll_bin": _upsample(roll_bin.astype(np.int32)),
+        "yaw_bin": _upsample(yaw_bin.astype(np.int32)),
+        "pitch_bin": _upsample(pitch_bin.astype(np.int32)),
     }
 
 
