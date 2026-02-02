@@ -26,6 +26,7 @@ from .config import (
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
 from .io_utils import (
+    apply_residual_angle,
     apply_residual_speed,
     filter_by_min_speed,
     load_spikes_50hz_counts,
@@ -273,6 +274,9 @@ def _plot_selected_models(rows, OUT_ROOT: Path, session: str):
 def run_one_session(
     session: str,
     use_residual_speed: bool = False,
+    use_residual_roll: bool = False,
+    use_residual_yaw: bool = False,
+    use_residual_pitch: bool = False,
     weights_base: Path | None = None,
 ) -> Tuple[bool, str]:
     if weights_base is None:
@@ -305,6 +309,12 @@ def run_one_session(
 
     if use_residual_speed:
         data_dict = apply_residual_speed(data_dict)
+    if use_residual_roll:
+        data_dict = apply_residual_angle(data_dict, "roll")
+    if use_residual_yaw:
+        data_dict = apply_residual_angle(data_dict, "yaw")
+    if use_residual_pitch:
+        data_dict = apply_residual_angle(data_dict, "pitch")
 
     T = int(data_dict["T"])
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)

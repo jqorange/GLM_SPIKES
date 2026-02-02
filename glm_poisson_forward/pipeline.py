@@ -17,7 +17,13 @@ def _write_lines(path: Path, lines):
             f.write(s + ("\n" if not str(s).endswith("\n") else ""))
 
 
-def main(use_residual_speed: bool = False, weights_base: Path | None = None):
+def main(
+    use_residual_speed: bool = False,
+    use_residual_roll: bool = False,
+    use_residual_yaw: bool = False,
+    use_residual_pitch: bool = False,
+    weights_base: Path | None = None,
+):
     if weights_base is None:
         weights_base = WEIGHTS_BASE
     weights_base.mkdir(parents=True, exist_ok=True)
@@ -53,6 +59,9 @@ def main(use_residual_speed: bool = False, weights_base: Path | None = None):
             ok, msg = run_one_session(
                 session,
                 use_residual_speed=use_residual_speed,
+                use_residual_roll=use_residual_roll,
+                use_residual_yaw=use_residual_yaw,
+                use_residual_pitch=use_residual_pitch,
                 weights_base=weights_base,
             )
         except Exception as e:  # pragma: no cover - runtime logging

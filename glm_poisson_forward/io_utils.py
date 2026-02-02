@@ -118,10 +118,13 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
+    roll = imu_df["roll"].values.astype(np.float32)
+    yaw = imu_df["yaw"].values.astype(np.float32)
+    pitch = imu_df["pitch"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    roll_bin = bin_col(roll, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    yaw_bin = bin_col(yaw, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    pitch_bin = bin_col(pitch, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
 
     return {
         "T": int(L),
@@ -129,6 +132,9 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "n_pos": int(n_pos),
         "head_v": head_v.astype(np.float32),
         "head_v_bin": head_v_bin.astype(np.int32),
+        "roll": roll.astype(np.float32),
+        "yaw": yaw.astype(np.float32),
+        "pitch": pitch.astype(np.float32),
         "roll_bin": roll_bin.astype(np.int32),
         "yaw_bin": yaw_bin.astype(np.int32),
         "pitch_bin": pitch_bin.astype(np.int32),
@@ -159,23 +165,60 @@ def filter_by_min_speed(
     return filtered, Y_all, mask
 
 
-def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    head_v = data_dict.get("head_v")
+def _residualize_by_position(values: np.ndarray, pos_idx: np.ndarray, n_pos: int) -> Tuple[np.ndarray, np.ndarray]:
+    n_pos = int(n_pos)
+    sums = np.bincount(pos_idx, weights=values, minlength=n_pos)
+    counts = np.bincount(pos_idx, minlength=n_pos)
+    means = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
+    hat = means[pos_idx]
+    residual = values - hat
+    return residual.astype(np.float32), hat.astype(np.float32)
+
+
+def apply_residual_feature(
+    data_dict: Dict[str, np.ndarray],
+    feature_key: str,
+    bin_key: str,
+    n_bins: int,
+    raw_key: str | None = None,
+    hat_key: str | None = None,
+    vmin=None,
+    vmax=None,
+) -> Dict[str, np.ndarray]:
+    values = data_dict.get(feature_key)
     pos_idx = data_dict.get("position")
     n_pos = data_dict.get("n_pos")
-    if head_v is None or pos_idx is None or n_pos is None:
+    if values is None or pos_idx is None or n_pos is None:
         return data_dict
 
-    n_pos = int(n_pos)
-    sums = np.bincount(pos_idx, weights=head_v, minlength=n_pos)
-    counts = np.bincount(pos_idx, minlength=n_pos)
-    mean_speed = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
-    speed_hat = mean_speed[pos_idx]
-    speed_res = head_v - speed_hat
-
+    residual, hat = _residualize_by_position(values.astype(np.float32), pos_idx, int(n_pos))
     updated = dict(data_dict)
-    updated["head_v_raw"] = head_v.astype(np.float32)
-    updated["head_v"] = speed_res.astype(np.float32)
-    updated["speed_hat"] = speed_hat.astype(np.float32)
-    updated["head_v_bin"] = bin_col(speed_res, n_bins=SPEED_N_BINS)
+    if raw_key is not None:
+        updated[raw_key] = values.astype(np.float32)
+    updated[feature_key] = residual
+    if hat_key is not None:
+        updated[hat_key] = hat
+    updated[bin_key] = bin_col(residual, n_bins=n_bins, vmin=vmin, vmax=vmax)
     return updated
+
+
+def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    return apply_residual_feature(
+        data_dict=data_dict,
+        feature_key="head_v",
+        bin_key="head_v_bin",
+        n_bins=SPEED_N_BINS,
+        raw_key="head_v_raw",
+        hat_key="speed_hat",
+    )
+
+
+def apply_residual_angle(data_dict: Dict[str, np.ndarray], angle_key: str) -> Dict[str, np.ndarray]:
+    return apply_residual_feature(
+        data_dict=data_dict,
+        feature_key=angle_key,
+        bin_key=f"{angle_key}_bin",
+        n_bins=ANGLE_N_BINS,
+        raw_key=f"{angle_key}_raw",
+        hat_key=f"{angle_key}_hat",
+    )
