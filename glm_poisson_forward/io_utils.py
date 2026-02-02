@@ -156,8 +156,13 @@ def filter_by_min_speed(
         mask = mask.reshape(-1)
     filtered = {}
     for k, v in data_dict.items():
-        if isinstance(v, np.ndarray) and v.shape[0] == mask.shape[0]:
-            filtered[k] = v[mask]
+        if isinstance(v, np.ndarray) and v.ndim > 0:
+            if v.shape[0] >= mask.shape[0]:
+                v = v[: mask.shape[0]]
+            if v.shape[0] == mask.shape[0]:
+                filtered[k] = v[mask]
+            else:
+                filtered[k] = v
         else:
             filtered[k] = v
     filtered["T"] = int(np.sum(mask))
