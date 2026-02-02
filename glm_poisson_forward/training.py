@@ -117,7 +117,10 @@ def save_neuron_artifacts_for_model(
             mdl.fit(Xtr, ytr)
             p_va = np.clip(mdl.predict_proba(Xva)[:, 1].astype(np.float64), 1e-12, 1 - 1e-12)
             w = np.concatenate(
-                [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
+                [
+                    mdl.coef_.ravel().astype(np.float32),
+                    np.asarray(mdl.intercept_, dtype=np.float32).ravel(),
+                ]
             )
 
         pd.DataFrame(
