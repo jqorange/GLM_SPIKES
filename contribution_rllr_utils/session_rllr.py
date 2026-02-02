@@ -33,7 +33,7 @@ from glm_poisson_forward.io_utils import (
     rebuild_inputs_50hz,
     session_paths,
 )
-from glm_poisson_forward.metrics import compute_llhi_bps_poisson
+from glm_poisson_forward.metrics import compute_llhi_bps_poisson_vs_baseline
 
 from .constants import MU_EPS, RLLR_FITS_DIRNAME, RLLR_STATS_DIRNAME
 from .selection import load_forward_selected_models
@@ -406,7 +406,7 @@ def compute_session_rllr(
             continue
         y = Y_all[:, ni].astype(np.float64)
         mu0_oof = None
-        if need_rllr or need_rllr_shuffle:
+        if need_rllr or need_rllr_shuffle or need_llhi or need_llhi_shuffle:
             mu0_oof = build_oof_intercept_mu(y, folds_idx)
             if need_rllr:
                 ll0 = poisson_loglik(y, mu0_oof)
@@ -437,8 +437,8 @@ def compute_session_rllr(
             if np.isfinite(ll_gain) and ll_gain < 0:
                 unfit_neurons.append(ni)
                 continue
-        if need_llhi:
-            llhi_full = compute_llhi_bps_poisson(y, mu_oof_full)
+        if need_llhi and mu0_oof is not None:
+            llhi_full = compute_llhi_bps_poisson_vs_baseline(y, mu_oof_full, mu0_oof)
             full_llhi_by_neuron[ni] = float(llhi_full)
         full_processed += 1
 
@@ -484,16 +484,16 @@ def compute_session_rllr(
                 ll0_shuf = np.nan
                 ll_full_shuf = np.nan
                 denom_shuf = np.nan
-                if need_llhi_shuffle:
-                    llhi_full_shuf = compute_llhi_bps_poisson(y_shuf, mu_oof_full)
+                if need_llhi_shuffle and mu0_oof is not None:
+                    llhi_full_shuf = compute_llhi_bps_poisson_vs_baseline(y_shuf, mu_oof_full, mu0_oof)
                 if need_rllr_shuffle and mu0_oof is not None:
                     ll0_shuf = poisson_loglik(y_shuf, mu0_oof)
                     ll_full_shuf = poisson_loglik(y_shuf, mu_oof_full)
                     denom_shuf = ll_full_shuf - ll0_shuf
 
                 for v, mu_red in mu_oof_red_by_feat.items():
-                    if need_llhi_shuffle:
-                        llhi_red_shuf = compute_llhi_bps_poisson(y_shuf, mu_red)
+                    if need_llhi_shuffle and mu0_oof is not None:
+                        llhi_red_shuf = compute_llhi_bps_poisson_vs_baseline(y_shuf, mu_red, mu0_oof)
                         shuf_llhi_vals[v].append(float(llhi_full_shuf - llhi_red_shuf))
                     if need_rllr_shuffle and np.isfinite(denom_shuf) and denom_shuf > MU_EPS:
                         ll_red_shuf = poisson_loglik(y_shuf, mu_red)
@@ -530,9 +530,9 @@ def compute_session_rllr(
                     ll_red = poisson_loglik(y, mu_oof_red_by_feat[v])
                     contrib_rllr[v][ni] = float((ll_full - ll_red) / denom)
 
-            if need_llhi:
+            if need_llhi and mu0_oof is not None:
                 llhi_full = full_llhi_by_neuron.get(ni, float("nan"))
-                llhi_red = compute_llhi_bps_poisson(y, mu_oof_red_by_feat[v])
+                llhi_red = compute_llhi_bps_poisson_vs_baseline(y, mu_oof_red_by_feat[v], mu0_oof)
                 if not np.isfinite(llhi_full) or not np.isfinite(llhi_red):
                     contrib_delta_llhi[v][ni] = float("nan")
                 else:

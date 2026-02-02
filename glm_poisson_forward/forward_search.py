@@ -32,7 +32,11 @@ from .io_utils import (
     rebuild_inputs_50hz,
     session_paths,
 )
-from .metrics import compute_llhi_bps_poisson, wilcoxon_greater
+from .metrics import (
+    build_oof_constant_mu,
+    compute_llhi_bps_poisson_vs_baseline,
+    wilcoxon_greater,
+)
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
     fit_predict_one_fold_poisson,
@@ -85,7 +89,8 @@ def _llhi_cv_for_neuron(
         fold_llhi.append(float(llhi))
         mu_oof[va] = mu_va
 
-    llhi_oof = compute_llhi_bps_poisson(y, mu_oof)
+    mu_base_oof = build_oof_constant_mu(y, folds_idx)
+    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y, mu_oof, mu_base_oof)
     return float(llhi_oof), fold_llhi
 
 
@@ -228,7 +233,13 @@ def _forward_select_one_neuron(
     }
 
 
-def _plot_selected_models(rows, OUT_ROOT: Path, session: str):
+def _plot_selected_models(
+    rows,
+    OUT_ROOT: Path,
+    session: str,
+    Y_all: np.ndarray,
+    folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+):
     fig_dir = OUT_ROOT / "figures"
     for rec in rows:
         neuron_name = rec["neuron"]
@@ -237,8 +248,11 @@ def _plot_selected_models(rows, OUT_ROOT: Path, session: str):
         neuron_dir = model_dir / neuron_name
 
         try:
+            neuron_idx = int(neuron_name.split("_")[-1]) - 1
+            y_full = Y_all[:, neuron_idx].astype(np.float64)
             y_oof, mu_oof = load_oof_from_neuron_dir(neuron_dir)
-            llhi = compute_llhi_bps_poisson(y_oof, mu_oof)
+            mu_base_oof = build_oof_constant_mu(y_full, folds_idx)
+            llhi = compute_llhi_bps_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
             title = f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | ΔLL={llhi:.4f} bits/spk"
             out_png = fig_dir / f"{neuron_name}__{model_key}.png"
             plot_fitting_curve(
@@ -330,7 +344,7 @@ def run_one_session(
         for n in unclassified:
             f.write(n + "\n")
 
-    _plot_selected_models(rows, OUT_ROOT, session)
+    _plot_selected_models(rows, OUT_ROOT, session, Y_all, folds_idx)
 
     with open(OUT_ROOT / "_SUCCESS", "w", encoding="utf-8") as f:
         f.write(f"OK\t{datetime.now().isoformat(timespec='seconds')}\n")

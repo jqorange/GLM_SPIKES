@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
 from .design_matrix import ensure_feature_mapping, model_key_from_vars
-from .metrics import compute_llhi_bps_poisson
+from .metrics import compute_llhi_bps_poisson_vs_baseline, build_oof_constant_mu
 
 
 def fit_predict_one_fold_poisson(
@@ -25,16 +25,19 @@ def fit_predict_one_fold_poisson(
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
 
     mean_tr = float(np.mean(ytr))
+    base_rate = max(mean_tr, 1e-12)
     if mean_tr <= 0:
         mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
-        llhi = compute_llhi_bps_poisson(yva, mu_va)
+        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+        llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
         return mu_va.astype(np.float32), float(llhi)
 
     mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
     mdl.fit(Xtr, ytr)
     mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
 
-    llhi = compute_llhi_bps_poisson(yva, mu_va)
+    mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+    llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
     return mu_va.astype(np.float32), float(llhi)
 
 
@@ -85,6 +88,7 @@ def save_neuron_artifacts_for_model(
         ytr, yva = y_all[tr].astype(np.float64), y_all[va].astype(np.float64)
 
         mean_tr = float(np.mean(ytr))
+        base_rate = max(mean_tr, 1e-12)
         if mean_tr <= 0:
             mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
@@ -108,7 +112,8 @@ def save_neuron_artifacts_for_model(
             hf.create_dataset("true_cnt", data=yva.astype(np.float32), compression="gzip")
             hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
 
-        llhi_val = compute_llhi_bps_poisson(yva, mu_va)
+        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+        llhi_val = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
         fold_llhi.append(float(llhi_val))
         pd.DataFrame({"fold": [k], "llhi_bits_per_spike": [float(llhi_val)]}).to_csv(
             fold_dir / "llhi.csv", index=False
@@ -116,7 +121,8 @@ def save_neuron_artifacts_for_model(
 
         mu_oof[va] = mu_va.astype(np.float32)
 
-    llhi_oof = compute_llhi_bps_poisson(y_all, mu_oof)
+    mu_base_oof = build_oof_constant_mu(y_all, folds)
+    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)
     mean_llhi = float(np.nanmean(fold_llhi))
 
     with open(neuron_dir / "summary.json", "w", encoding="utf-8") as f:
