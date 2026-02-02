@@ -72,7 +72,7 @@ def _fit_one_fold_weights_bernoulli(
     )
     mdl.fit(Xtr, ytr)
     w = np.concatenate(
-        [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
+        [mdl.coef_.ravel().astype(np.float32), np.asarray(mdl.intercept_, dtype=np.float32).ravel()]
     )
     return w
 
