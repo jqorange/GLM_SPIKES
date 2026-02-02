@@ -92,9 +92,20 @@ def _vector_length_k(weights: np.ndarray, angles: np.ndarray, k: int) -> float:
     return float(np.abs(vect))
 
 
+def _masked_bins_and_spikes(
+    bins: np.ndarray, spikes: np.ndarray, mask: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    bins_sel = np.asarray(bins)[mask].reshape(-1)
+    spikes_sel = np.asarray(spikes)[mask].reshape(-1)
+    if bins_sel.shape[0] != spikes_sel.shape[0]:
+        L = min(bins_sel.shape[0], spikes_sel.shape[0])
+        bins_sel = bins_sel[:L]
+        spikes_sel = spikes_sel[:L]
+    return bins_sel, spikes_sel
+
+
 def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> Tuple[float, np.ndarray]:
-    spikes_sel = spikes[mask]
-    bins_sel = angle_bin[mask]
+    bins_sel, spikes_sel = _masked_bins_and_spikes(angle_bin, spikes, mask)
 
     occ = np.bincount(bins_sel, minlength=ANGLE_N_BINS).astype(np.float64)
     spk = np.bincount(bins_sel, weights=spikes_sel, minlength=ANGLE_N_BINS).astype(np.float64)
@@ -127,8 +138,7 @@ def speed_score(head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> flo
         raise ValueError("speed_score expects 1D spikes array")
 
     bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
-    bins_sel = bins[mask]
-    spikes_sel = spikes[mask]
+    bins_sel, spikes_sel = _masked_bins_and_spikes(bins, spikes, mask)
 
     occ = np.bincount(bins_sel, minlength=SPEED_N_BINS).astype(np.float64)
     spk = np.bincount(bins_sel, weights=spikes_sel, minlength=SPEED_N_BINS).astype(np.float64)
@@ -157,8 +167,7 @@ def _speed_tuning_with_valid(
     head_v: np.ndarray, spikes: np.ndarray, mask: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     bins = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
-    bins_sel = bins[mask]
-    spikes_sel = spikes[mask]
+    bins_sel, spikes_sel = _masked_bins_and_spikes(bins, spikes, mask)
 
     occ = np.bincount(bins_sel, minlength=SPEED_N_BINS).astype(np.float64)
     spk = np.bincount(bins_sel, weights=spikes_sel, minlength=SPEED_N_BINS).astype(np.float64)
