@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Batch GLM forward selection entry point (Poisson, 50 Hz).
+Batch GLM forward selection entry point (Bernoulli, 200 Hz).
 
 The implementation is split across the ``glm_poisson_forward`` package:
 - ``config``: 全局配置 (paths、超参数等)
@@ -14,4 +14,3 @@ from glm_poisson_forward.pipeline import main
 
 if __name__ == "__main__":
     main()
-

@@ -19,18 +19,21 @@ SEED = 0
 CV_FOLDS = 10
 
 # Bin definitions
-BIN_MS = 20
+BIN_MS = 5
 FS_HZ = 50.0
 BASE_FS = 200.0
 AGG_FACTOR = int(BASE_FS / FS_HZ)  # 4
+MODEL_FS_HZ = 200.0
+UPSAMPLE_FACTOR = int(MODEL_FS_HZ / FS_HZ)  # 4
 MAX_MISMATCH_FRAMES_50HZ = 5  # tolerance in 50 Hz frames
+MAX_MISMATCH_FRAMES_200HZ = MAX_MISMATCH_FRAMES_50HZ * UPSAMPLE_FACTOR
 
 # Forward-selection test threshold
 ALPHA = 0.05
 
-# PoissonRegressor params
+# Bernoulli GLM (LogisticRegression) params
 MAX_ITER = 500
-POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
+LOGREG_C = 10.0
 
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]

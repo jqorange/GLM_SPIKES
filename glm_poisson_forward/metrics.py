@@ -11,6 +11,13 @@ def poisson_ll_noconst(y: np.ndarray, mu: np.ndarray) -> float:
     return float(np.sum(y * np.log(mu) - mu))
 
 
+def bernoulli_ll_noconst(y: np.ndarray, p: np.ndarray) -> float:
+    y = np.asarray(y, dtype=np.float64)
+    p = np.asarray(p, dtype=np.float64)
+    p = np.clip(p, 1e-12, 1 - 1e-12)
+    return float(np.sum(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
 def compute_llhi_bps_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> float:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
     mu = np.asarray(mu_pred, dtype=np.float64).ravel()
@@ -20,6 +27,22 @@ def compute_llhi_bps_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> float:
 
     ll_m = poisson_ll_noconst(y, mu)
     ll_b = poisson_ll_noconst(y, mu0)
+
+    nsp = float(np.sum(y))
+    if nsp <= 0:
+        return float("nan")
+    return (ll_m - ll_b) / (nsp * np.log(2))
+
+
+def compute_llhi_bps_bernoulli(y_bin: np.ndarray, p_pred: np.ndarray) -> float:
+    y = np.asarray(y_bin, dtype=np.float64).ravel()
+    p = np.asarray(p_pred, dtype=np.float64).ravel()
+    if y.size == 0:
+        return float("nan")
+    p0 = np.full_like(y, fill_value=np.mean(y), dtype=np.float64)
+
+    ll_m = bernoulli_ll_noconst(y, p)
+    ll_b = bernoulli_ll_noconst(y, p0)
 
     nsp = float(np.sum(y))
     if nsp <= 0:
@@ -47,6 +70,26 @@ def compute_llhi_bps_poisson_vs_baseline(
     return (ll_m - ll_b) / (nsp * np.log(2))
 
 
+def compute_llhi_bps_bernoulli_vs_baseline(
+    y_bin: np.ndarray,
+    p_pred: np.ndarray,
+    p_base: np.ndarray,
+) -> float:
+    y = np.asarray(y_bin, dtype=np.float64).ravel()
+    p = np.asarray(p_pred, dtype=np.float64).ravel()
+    p0 = np.asarray(p_base, dtype=np.float64).ravel()
+    if y.size == 0:
+        return float("nan")
+
+    ll_m = bernoulli_ll_noconst(y, p)
+    ll_b = bernoulli_ll_noconst(y, p0)
+
+    nsp = float(np.sum(y))
+    if nsp <= 0:
+        return float("nan")
+    return (ll_m - ll_b) / (nsp * np.log(2))
+
+
 def dll_bits_series_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> np.ndarray:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
     mu = np.asarray(mu_pred, dtype=np.float64).ravel()
@@ -63,6 +106,22 @@ def dll_bits_series_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> np.ndarra
     return (dll / np.log(2)).astype(np.float32)
 
 
+def dll_bits_series_bernoulli(y_bin: np.ndarray, p_pred: np.ndarray) -> np.ndarray:
+    y = np.asarray(y_bin, dtype=np.float64).ravel()
+    p = np.asarray(p_pred, dtype=np.float64).ravel()
+    if y.size == 0:
+        return np.array([], dtype=np.float32)
+
+    p = np.clip(p, 1e-12, 1 - 1e-12)
+    mean_rate = float(np.mean(y))
+    mean_rate = min(max(mean_rate, 1e-12), 1 - 1e-12)
+
+    ll_m = y * np.log(p) + (1 - y) * np.log(1 - p)
+    ll_b = y * np.log(mean_rate) + (1 - y) * np.log(1 - mean_rate)
+    dll = ll_m - ll_b
+    return (dll / np.log(2)).astype(np.float32)
+
+
 def build_oof_constant_mu(y_cnt: np.ndarray, folds_idx) -> np.ndarray:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
     mu_oof = np.full_like(y, fill_value=1e-12, dtype=np.float64)
@@ -70,6 +129,15 @@ def build_oof_constant_mu(y_cnt: np.ndarray, folds_idx) -> np.ndarray:
         mean_tr = float(np.mean(y[tr]))
         mu_oof[va] = max(mean_tr, 1e-12)
     return mu_oof
+
+
+def build_oof_constant_prob(y_bin: np.ndarray, folds_idx) -> np.ndarray:
+    y = np.asarray(y_bin, dtype=np.float64).ravel()
+    p_oof = np.full_like(y, fill_value=1e-12, dtype=np.float64)
+    for tr, va in folds_idx:
+        mean_tr = float(np.mean(y[tr]))
+        p_oof[va] = min(max(mean_tr, 1e-12), 1 - 1e-12)
+    return p_oof
 
 
 def dll_bits_series_poisson_vs_baseline(
@@ -88,6 +156,26 @@ def dll_bits_series_poisson_vs_baseline(
 
     ll_m = y * np.log(mu) - mu
     ll_b = y * np.log(mu0) - mu0
+    dll = ll_m - ll_b
+    return (dll / np.log(2)).astype(np.float32)
+
+
+def dll_bits_series_bernoulli_vs_baseline(
+    y_bin: np.ndarray,
+    p_pred: np.ndarray,
+    p_base: np.ndarray,
+) -> np.ndarray:
+    y = np.asarray(y_bin, dtype=np.float64).ravel()
+    p = np.asarray(p_pred, dtype=np.float64).ravel()
+    p0 = np.asarray(p_base, dtype=np.float64).ravel()
+    if y.size == 0:
+        return np.array([], dtype=np.float32)
+
+    p = np.clip(p, 1e-12, 1 - 1e-12)
+    p0 = np.clip(p0, 1e-12, 1 - 1e-12)
+
+    ll_m = y * np.log(p) + (1 - y) * np.log(1 - p)
+    ll_b = y * np.log(p0) + (1 - y) * np.log(1 - p0)
     dll = ll_m - ll_b
     return (dll / np.log(2)).astype(np.float32)
 

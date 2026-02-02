@@ -12,6 +12,7 @@ from .config import (
     POSITION_ROOT,
     SPEED_N_BINS,
     SPIKE_ROOT,
+    UPSAMPLE_FACTOR,
 )
 from .design_matrix import bin_col, build_position_index
 
@@ -96,6 +97,12 @@ def load_spikes_50hz_counts(h5_path) -> np.ndarray:
     return Y50.astype(np.int32)
 
 
+def load_spikes_200hz_binary(h5_path) -> np.ndarray:
+    with h5py.File(h5_path, "r") as hf:
+        Y200 = hf["spike_binary"][:].astype(np.int8)  # (T200, N)
+    return (Y200 > 0).astype(np.int8)
+
+
 def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.ndarray]:
     pos_df = pd.read_csv(paths["position"], usecols=["head_x", "head_y", "heading_deg"]).astype(np.float32)
     dlc_df = pd.read_csv(paths["dlc_final"], usecols=["head_v"]).astype(np.float32)
@@ -133,6 +140,23 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "yaw_bin": yaw_bin.astype(np.int32),
         "pitch_bin": pitch_bin.astype(np.int32),
     }
+
+
+def rebuild_inputs_200hz(session: str, paths: Dict[str, object]) -> Dict[str, np.ndarray]:
+    data_50 = rebuild_inputs_50hz(session, paths)
+    factor = int(UPSAMPLE_FACTOR)
+    if factor <= 1:
+        return data_50
+
+    T = int(data_50["T"])
+    upsampled: Dict[str, np.ndarray] = {}
+    for k, v in data_50.items():
+        if isinstance(v, np.ndarray) and v.shape[0] == T:
+            upsampled[k] = np.repeat(v, factor, axis=0)
+        else:
+            upsampled[k] = v
+    upsampled["T"] = int(T * factor)
+    return upsampled
 
 
 def filter_by_min_speed(

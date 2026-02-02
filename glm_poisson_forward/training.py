@@ -7,15 +7,15 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.linear_model import PoissonRegressor
+from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
 
-from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
+from .config import FULL_FIT_DIRNAME, LOGREG_C, MAX_ITER, N_JOBS
 from .design_matrix import ensure_feature_mapping, model_key_from_vars
-from .metrics import compute_llhi_bps_poisson_vs_baseline, build_oof_constant_mu
+from .metrics import compute_llhi_bps_bernoulli_vs_baseline, build_oof_constant_prob
 
 
-def fit_predict_one_fold_poisson(
+def fit_predict_one_fold_bernoulli(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     tr_idx: np.ndarray,
@@ -25,23 +25,29 @@ def fit_predict_one_fold_poisson(
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
 
     mean_tr = float(np.mean(ytr))
-    base_rate = max(mean_tr, 1e-12)
-    if mean_tr <= 0:
-        mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
-        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-        llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
-        return mu_va.astype(np.float32), float(llhi)
+    base_rate = min(max(mean_tr, 1e-12), 1 - 1e-12)
+    if mean_tr <= 0 or mean_tr >= 1:
+        p_va = np.full_like(yva, base_rate, dtype=np.float64)
+        p_base = np.full_like(yva, base_rate, dtype=np.float64)
+        llhi = compute_llhi_bps_bernoulli_vs_baseline(yva, p_va, p_base)
+        return p_va.astype(np.float32), float(llhi)
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
+    mdl = LogisticRegression(
+        penalty="l2",
+        C=LOGREG_C,
+        solver="lbfgs",
+        max_iter=MAX_ITER,
+        fit_intercept=True,
+    )
     mdl.fit(Xtr, ytr)
-    mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+    p_va = np.clip(mdl.predict_proba(Xva)[:, 1].astype(np.float64), 1e-12, 1 - 1e-12)
 
-    mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-    llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
-    return mu_va.astype(np.float32), float(llhi)
+    p_base = np.full_like(yva, base_rate, dtype=np.float64)
+    llhi = compute_llhi_bps_bernoulli_vs_baseline(yva, p_va, p_base)
+    return p_va.astype(np.float32), float(llhi)
 
 
-def _fit_one_fold_weights_poisson(
+def _fit_one_fold_weights_bernoulli(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     tr_idx: np.ndarray,
@@ -51,12 +57,19 @@ def _fit_one_fold_weights_poisson(
     ytr = y_all[tr_idx].astype(np.float64)
 
     mean_tr = float(np.mean(ytr))
-    if mean_tr <= 0:
+    if mean_tr <= 0 or mean_tr >= 1:
+        base_rate = min(max(mean_tr, 1e-12), 1 - 1e-12)
         w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
-        w[-1] = np.log(1e-12)
+        w[-1] = float(np.log(base_rate / (1 - base_rate)))
         return w
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
+    mdl = LogisticRegression(
+        penalty="l2",
+        C=LOGREG_C,
+        solver="lbfgs",
+        max_iter=MAX_ITER,
+        fit_intercept=True,
+    )
     mdl.fit(Xtr, ytr)
     w = np.concatenate(
         [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
@@ -88,15 +101,21 @@ def save_neuron_artifacts_for_model(
         ytr, yva = y_all[tr].astype(np.float64), y_all[va].astype(np.float64)
 
         mean_tr = float(np.mean(ytr))
-        base_rate = max(mean_tr, 1e-12)
-        if mean_tr <= 0:
-            mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
+        base_rate = min(max(mean_tr, 1e-12), 1 - 1e-12)
+        if mean_tr <= 0 or mean_tr >= 1:
+            p_va = np.full_like(yva, base_rate, dtype=np.float64)
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
-            w[-1] = np.log(1e-12)
+            w[-1] = float(np.log(base_rate / (1 - base_rate)))
         else:
-            mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
+            mdl = LogisticRegression(
+                penalty="l2",
+                C=LOGREG_C,
+                solver="lbfgs",
+                max_iter=MAX_ITER,
+                fit_intercept=True,
+            )
             mdl.fit(Xtr, ytr)
-            mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+            p_va = np.clip(mdl.predict_proba(Xva)[:, 1].astype(np.float64), 1e-12, 1 - 1e-12)
             w = np.concatenate(
                 [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
             )
@@ -108,21 +127,21 @@ def save_neuron_artifacts_for_model(
         ).to_csv(fold_dir / "weights.csv")
 
         with h5py.File(fold_dir / "pred.h5", "w") as hf:
-            hf.create_dataset("pred_mu", data=mu_va.astype(np.float32), compression="gzip")
+            hf.create_dataset("pred_mu", data=p_va.astype(np.float32), compression="gzip")
             hf.create_dataset("true_cnt", data=yva.astype(np.float32), compression="gzip")
             hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
 
-        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-        llhi_val = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
+        p_base = np.full_like(yva, base_rate, dtype=np.float64)
+        llhi_val = compute_llhi_bps_bernoulli_vs_baseline(yva, p_va, p_base)
         fold_llhi.append(float(llhi_val))
         pd.DataFrame({"fold": [k], "llhi_bits_per_spike": [float(llhi_val)]}).to_csv(
             fold_dir / "llhi.csv", index=False
         )
 
-        mu_oof[va] = mu_va.astype(np.float32)
+        mu_oof[va] = p_va.astype(np.float32)
 
-    mu_base_oof = build_oof_constant_mu(y_all, folds)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)
+    mu_base_oof = build_oof_constant_prob(y_all, folds)
+    llhi_oof = compute_llhi_bps_bernoulli_vs_baseline(y_all, mu_oof, mu_base_oof)
     mean_llhi = float(np.nanmean(fold_llhi))
 
     with open(neuron_dir / "summary.json", "w", encoding="utf-8") as f:
@@ -132,7 +151,7 @@ def save_neuron_artifacts_for_model(
                 "oof_llhi_bits_per_spike": float(llhi_oof),
                 "mean_llhi_over_folds_bits_per_spike": float(mean_llhi),
                 "fold_llhi_bits_per_spike": list(map(float, fold_llhi)),
-                "poisson_alpha": float(POISSON_ALPHA),
+                "logreg_c": float(LOGREG_C),
             },
             f,
             indent=2,
@@ -175,7 +194,7 @@ def save_full_fit_weights_for_all_neurons(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = _fit_one_fold_weights_poisson(X_all, y, tr)
+                w = _fit_one_fold_weights_bernoulli(X_all, y, tr)
                 ws.append(w)
 
                 fold_dir = neuron_dir / f"fold{k}"

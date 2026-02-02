@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Batch GLM forward selection entry point (Poisson, residual speed test).
+Batch GLM forward selection entry point (Bernoulli, residual speed test).
 
 Uses residual speed (s_res = s - E[s|pos]) in place of speed while generating
 the same outputs as the standard GLM_Poisson_Forward pipeline.

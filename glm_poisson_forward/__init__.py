@@ -1,2 +1,1 @@
-"""GLM Poisson forward-selection package."""
-
+"""GLM Bernoulli forward-selection package."""

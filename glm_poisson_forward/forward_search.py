@@ -14,7 +14,7 @@ from tqdm import tqdm
 from .config import (
     ALPHA,
     CV_FOLDS,
-    MAX_MISMATCH_FRAMES_50HZ,
+    MAX_MISMATCH_FRAMES_200HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
     PLOT_END_SEC,
@@ -28,18 +28,18 @@ from .design_matrix import build_design_matrix, model_key_from_vars
 from .io_utils import (
     apply_residual_speed,
     filter_by_min_speed,
-    load_spikes_50hz_counts,
-    rebuild_inputs_50hz,
+    load_spikes_200hz_binary,
+    rebuild_inputs_200hz,
     session_paths,
 )
 from .metrics import (
-    build_oof_constant_mu,
-    compute_llhi_bps_poisson_vs_baseline,
+    build_oof_constant_prob,
+    compute_llhi_bps_bernoulli_vs_baseline,
     wilcoxon_greater,
 )
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
 from .training import (
-    fit_predict_one_fold_poisson,
+    fit_predict_one_fold_bernoulli,
     save_full_fit_weights_for_all_neurons,
     save_neuron_artifacts_for_model,
 )
@@ -85,12 +85,12 @@ def _llhi_cv_for_neuron(
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
+        mu_va, llhi = fit_predict_one_fold_bernoulli(X_all_m, y, tr, va)
         fold_llhi.append(float(llhi))
         mu_oof[va] = mu_va
 
-    mu_base_oof = build_oof_constant_mu(y, folds_idx)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y, mu_oof, mu_base_oof)
+    mu_base_oof = build_oof_constant_prob(y, folds_idx)
+    llhi_oof = compute_llhi_bps_bernoulli_vs_baseline(y, mu_oof, mu_base_oof)
     return float(llhi_oof), fold_llhi
 
 
@@ -251,9 +251,12 @@ def _plot_selected_models(
             neuron_idx = int(neuron_name.split("_")[-1]) - 1
             y_full = Y_all[:, neuron_idx].astype(np.float64)
             y_oof, mu_oof = load_oof_from_neuron_dir(neuron_dir)
-            mu_base_oof = build_oof_constant_mu(y_full, folds_idx)
-            llhi = compute_llhi_bps_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
-            title = f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | ΔLL={llhi:.4f} bits/spk"
+            mu_base_oof = build_oof_constant_prob(y_full, folds_idx)
+            llhi = compute_llhi_bps_bernoulli_vs_baseline(y_oof, mu_oof, mu_base_oof)
+            title = (
+                f"{session} | {neuron_name} | BernoulliGLM | vars={model_key.replace('_','+')} | "
+                f"ΔLL={llhi:.4f} bits/spk"
+            )
             out_png = fig_dir / f"{neuron_name}__{model_key}.png"
             plot_fitting_curve(
                 out_png,
@@ -285,19 +288,21 @@ def run_one_session(
         if not paths[k].exists():
             return False, f"Missing input {k}: {paths[k]}"
 
-    data_dict = rebuild_inputs_50hz(session, paths)
+    data_dict = rebuild_inputs_200hz(session, paths)
 
-    Y50 = load_spikes_50hz_counts(paths["spike"])  # (T50_spk, N)
-    T_spk, N_NEURONS = Y50.shape
+    Y200 = load_spikes_200hz_binary(paths["spike"])  # (T200_spk, N)
+    T_spk, N_NEURONS = Y200.shape
 
     T_cov = int(data_dict["T"])
     T = min(T_cov, T_spk)
-    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
-        return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
+    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_200HZ:
+        return False, (
+            f"Length mismatch @200Hz (> {MAX_MISMATCH_FRAMES_200HZ}): cov={T_cov}, spk={T_spk}"
+        )
 
     for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
         data_dict[k] = data_dict[k][:T]
-    Y_all = Y50[:T].astype(np.float64)
+    Y_all = Y200[:T].astype(np.float64)
     data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
     if speed_mask is not None and not speed_mask.any():
         return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
@@ -324,7 +329,7 @@ def run_one_session(
 
     results = Parallel(n_jobs=N_JOBS, backend="loky")(
         delayed(_forward_select_one_neuron)(i, Y_all, folds_idx, OUT_ROOT, get_X_and_feats)
-        for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Poisson)")
+        for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Bernoulli)")
     )
 
     logs_dir = OUT_ROOT / "logs"
@@ -349,4 +354,4 @@ def run_one_session(
     with open(OUT_ROOT / "_SUCCESS", "w", encoding="utf-8") as f:
         f.write(f"OK\t{datetime.now().isoformat(timespec='seconds')}\n")
 
-    return True, f"OK (T50={T}, N={N_NEURONS})"
+    return True, f"OK (T200={T}, N={N_NEURONS})"
