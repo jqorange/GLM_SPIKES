@@ -13,39 +13,49 @@ from matplotlib.patches import Patch
 
 # ===================== 配置区 =====================
 
-WEIGHTS_BASE = Path(r"D:\Jiaqi\Projects\GLM_SPIKES\weights_Poisson_forward")  # 修改成你的路径
+WEIGHTS_BASE = Path(r"D:\Jiaqi\Projects\GLM_test\GLM_SPIKES\weights_Poisson_forward")  # 修改成你的路径
 
-# DAY_SEARCH_DIRS = [
-#     r"W:\data\FieldRat\2024\F4\day1",
-#     r"W:\data\FieldRat\2024\F4\day4",
-#     r"W:\data\FieldRat\2024\F5\Merged\day2\121_day2",
-#     r"W:\data\FieldRat\2024\F5\Merged\day3\121_day3",
-#     r"W:\data\FieldRat\2024\F5\Merged\day5\121_day5",
-#     r"W:\data\FieldRat\2024\F5\Merged\day6\3E6_day6",
-#     r"W:\data\FieldRat\2024\F5\Merged\day10\121_day10",
-#     r"W:\data\FieldRat\2024\F6\Merged\day3\3E6_day3",
-#     r"W:\data\FieldRat\2024\F6\Merged\day5\3E6_day5",
-#     r"W:\data\FieldRat\2024\F6\Merged\day8\3E6_day8",
-#     r"W:\data\FieldRat\2024\F6\Merged\day9\3E6_day9",
-#     r"W:\data\FieldRat\2024\F6\Merged\day10\3E6_day10",
-#     r"W:\data\FieldRat\2024\F6\Merged\day2\3E6_day2",
-#     r"W:\data\FieldRat\2024\F6\Merged\day4\3E6_day4",
-#     r"W:\data\FieldRat\2024\F6\Merged\day6\121_day6",
-# ]
 DAY_SEARCH_DIRS = [
-    r"W:\data\FieldRat\2024\F5\Merged\day2\121_day2",
-    r"W:\data\FieldRat\2024\F5\Merged\day3\121_day3",
-    r"W:\data\FieldRat\2024\F5\Merged\day7\121_day7",
-    r"W:\data\FieldRat\2024\F5\Merged\day10\121_day10",
+    r"I:\data\FieldRat\2024\F4\day1",
+    r"I:\data\FieldRat\2024\F4\day4",
+    r"I:\data\FieldRat\2024\F5\Merged\day2\121_day2",
+    r"I:\data\FieldRat\2024\F5\Merged\day3\121_day3",
+    r"I:\data\FieldRat\2024\F5\Merged\day5\121_day5",
+    r"I:\data\FieldRat\2024\F5\Merged\day6\3E6_day6",
+    r"I:\data\FieldRat\2024\F5\Merged\day10\121_day10",
+    r"I:\data\FieldRat\2024\F6\Merged\day3\3E6_day3",
+    r"I:\data\FieldRat\2024\F6\Merged\day5\3E6_day5",
+    r"I:\data\FieldRat\2024\F6\Merged\day8\3E6_day8",
+    r"I:\data\FieldRat\2024\F6\Merged\day9\3E6_day9",
+    r"I:\data\FieldRat\2024\F6\Merged\day10\3E6_day10",
+    r"I:\data\FieldRat\2024\F6\Merged\day2\3E6_day2",
+    r"I:\data\FieldRat\2024\F6\Merged\day4\3E6_day4",
+    r"I:\data\FieldRat\2024\F6\Merged\day6\121_day6",
+    r"I:\data\FieldRat\2024\F5\Merged\day2\121_day2",
+    r"I:\data\FieldRat\2024\F5\Merged\day3\121_day3",
+    r"I:\data\FieldRat\2024\F5\Merged\day7\121_day7",
+    r"I:\data\FieldRat\2024\F5\Merged\day10\121_day10",
 
-    r"W:\data\FieldRat\2024\F6\Merged\day2\3E6_day2",
-    r"W:\data\FieldRat\2024\F6\Merged\day3\3E6_day3",
-    r"W:\data\FieldRat\2024\F6\Merged\day7\3E6_day7",
-    r"W:\data\FieldRat\2024\F6\Merged\day8\3E6_day8",
-    r"W:\data\FieldRat\2024\F6\Merged\day10\3E6_day10",
-
-    # r"W:\data\FieldRat\2024\F8\Merged\day2\3E6_day2", # WIP
+    r"I:\data\FieldRat\2024\F6\Merged\day2\3E6_day2",
+    r"I:\data\FieldRat\2024\F6\Merged\day3\3E6_day3",
+    #r"I:\data\FieldRat\2024\F6\Merged\day7\3E6_day7",
+    r"I:\data\FieldRat\2024\F6\Merged\day8\3E6_day8",
+    r"I:\data\FieldRat\2024\F6\Merged\day10\3E6_day10",
 ]
+# DAY_SEARCH_DIRS = [
+#     r"I:\data\FieldRat\2024\F5\Merged\day2\121_day2",
+#     r"I:\data\FieldRat\2024\F5\Merged\day3\121_day3",
+#     r"I:\data\FieldRat\2024\F5\Merged\day7\121_day7",
+#     r"I:\data\FieldRat\2024\F5\Merged\day10\121_day10",
+#
+#     r"I:\data\FieldRat\2024\F6\Merged\day2\3E6_day2",
+#     r"I:\data\FieldRat\2024\F6\Merged\day3\3E6_day3",
+#    # r"I:\data\FieldRat\2024\F6\Merged\day7\3E6_day7",
+#     r"I:\data\FieldRat\2024\F6\Merged\day8\3E6_day8",
+#     r"I:\data\FieldRat\2024\F6\Merged\day10\3E6_day10",
+#
+#     # r"I:\data\FieldRat\2024\F8\Merged\day2\3E6_day2", # WIP
+# ]
 DAY_SEARCH_DIRS = [Path(p) for p in DAY_SEARCH_DIRS]
 
 LETTER_ORDER = "PSIRY"
