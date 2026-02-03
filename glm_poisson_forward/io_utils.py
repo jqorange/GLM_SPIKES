@@ -119,9 +119,12 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    roll_vals = imu_df["roll"].values.astype(np.float32)
+    yaw_vals = imu_df["yaw"].values.astype(np.float32)
+    pitch_vals = imu_df["pitch"].values.astype(np.float32)
+    roll_bin = bin_col(roll_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    yaw_bin = bin_col(yaw_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    pitch_bin = bin_col(pitch_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
 
     return {
         "T": int(L),
@@ -129,6 +132,9 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "n_pos": int(n_pos),
         "head_v": head_v.astype(np.float32),
         "head_v_bin": head_v_bin.astype(np.int32),
+        "roll": roll_vals,
+        "yaw": yaw_vals,
+        "pitch": pitch_vals,
         "roll_bin": roll_bin.astype(np.int32),
         "yaw_bin": yaw_bin.astype(np.int32),
         "pitch_bin": pitch_bin.astype(np.int32),
@@ -159,23 +165,36 @@ def filter_by_min_speed(
     return filtered, Y_all, mask
 
 
-def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    head_v = data_dict.get("head_v")
+def apply_residual_by_position(
+    data_dict: Dict[str, np.ndarray],
+    value_key: str,
+    bin_key: str,
+    n_bins: int,
+) -> Dict[str, np.ndarray]:
+    values = data_dict.get(value_key)
     pos_idx = data_dict.get("position")
     n_pos = data_dict.get("n_pos")
-    if head_v is None or pos_idx is None or n_pos is None:
+    if values is None or pos_idx is None or n_pos is None:
         return data_dict
 
     n_pos = int(n_pos)
-    sums = np.bincount(pos_idx, weights=head_v, minlength=n_pos)
+    sums = np.bincount(pos_idx, weights=values, minlength=n_pos)
     counts = np.bincount(pos_idx, minlength=n_pos)
-    mean_speed = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
-    speed_hat = mean_speed[pos_idx]
-    speed_res = head_v - speed_hat
+    mean_vals = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
+    vals_hat = mean_vals[pos_idx]
+    vals_res = values - vals_hat
 
     updated = dict(data_dict)
-    updated["head_v_raw"] = head_v.astype(np.float32)
-    updated["head_v"] = speed_res.astype(np.float32)
-    updated["speed_hat"] = speed_hat.astype(np.float32)
-    updated["head_v_bin"] = bin_col(speed_res, n_bins=SPEED_N_BINS)
+    updated[f"{value_key}_raw"] = values.astype(np.float32)
+    updated[value_key] = vals_res.astype(np.float32)
+    updated[f"{value_key}_hat"] = vals_hat.astype(np.float32)
+    updated[bin_key] = bin_col(vals_res, n_bins=n_bins)
     return updated
+
+
+def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    return apply_residual_by_position(data_dict, "head_v", "head_v_bin", SPEED_N_BINS)
+
+
+def apply_residual_angle(data_dict: Dict[str, np.ndarray], angle_key: str) -> Dict[str, np.ndarray]:
+    return apply_residual_by_position(data_dict, angle_key, f"{angle_key}_bin", ANGLE_N_BINS)
