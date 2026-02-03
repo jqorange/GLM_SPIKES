@@ -143,7 +143,7 @@ def _forward_select_one_neuron(
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
     best_v, best_oof_llhi, best_fold, best_dll_seq = single_candidates[0]
 
-    stat, p, n = wilcoxon_greater(best_dll_seq, b=None)
+    stat, p, n = wilcoxon_greater(np.asarray(best_fold, dtype=np.float64), b=None)
     accepted = (p < ALPHA)
 
     path_records.append(
@@ -171,7 +171,7 @@ def _forward_select_one_neuron(
 
     selected = [best_v]
     remaining.remove(best_v)
-    oof_dll_prev = best_dll_seq
+    fold_llhi_prev = best_fold
 
     step = 2
     while remaining:
@@ -186,7 +186,10 @@ def _forward_select_one_neuron(
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
         best_cand, best_trial_vars, best_trial_oof_llhi, best_trial_fold, best_trial_dll = cand_list[0]
 
-        stat, p, n = wilcoxon_greater(best_trial_dll, oof_dll_prev)
+        stat, p, n = wilcoxon_greater(
+            np.asarray(best_trial_fold, dtype=np.float64),
+            np.asarray(fold_llhi_prev, dtype=np.float64),
+        )
         accepted = (p < ALPHA)
 
         path_records.append(
@@ -208,7 +211,7 @@ def _forward_select_one_neuron(
         _save_accepted_step(neuron_idx, best_trial_vars, OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
         selected = best_trial_vars
         remaining.remove(best_cand)
-        oof_dll_prev = best_trial_dll
+        fold_llhi_prev = best_trial_fold
         step += 1
 
         if len(selected) == len(VARS_ALL):
@@ -218,10 +221,13 @@ def _forward_select_one_neuron(
     const_stat = None
     const_n = None
     if selected:
-        _llhi, _folds, _dll_prev, dll_vs_const = _llhi_cv_for_neuron(
+        _llhi, _folds, _dll_prev, _dll_vs_const = _llhi_cv_for_neuron(
             selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
         )
-        const_stat, const_p, const_n = wilcoxon_greater(dll_vs_const, b=None)
+        const_stat, const_p, const_n = wilcoxon_greater(
+            np.asarray(_folds, dtype=np.float64),
+            b=None,
+        )
         if const_p >= ALPHA:
             return {
                 "neuron": f"neuron_{neuron_idx+1}",
