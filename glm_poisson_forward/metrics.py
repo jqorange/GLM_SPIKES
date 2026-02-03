@@ -4,11 +4,18 @@ import numpy as np
 from scipy.stats import wilcoxon
 
 
-def poisson_ll_noconst(y: np.ndarray, mu: np.ndarray) -> float:
+def poisson_ll_noconst(
+    y: np.ndarray,
+    mu: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> float:
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
     mu = np.clip(mu, 1e-12, None)
-    return float(np.sum(y * np.log(mu) - mu))
+    ll = y * np.log(mu) - mu
+    if sample_weight is not None:
+        ll = ll * np.asarray(sample_weight, dtype=np.float64)
+    return float(np.sum(ll))
 
 
 def compute_llhi_bps_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> float:
@@ -51,6 +58,7 @@ def compute_delta_ll_poisson_vs_baseline(
     y_cnt: np.ndarray,
     mu_pred: np.ndarray,
     mu_base: np.ndarray,
+    sample_weight: np.ndarray | None = None,
 ) -> float:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
     mu = np.asarray(mu_pred, dtype=np.float64).ravel()
@@ -58,8 +66,8 @@ def compute_delta_ll_poisson_vs_baseline(
     if y.size == 0:
         return float("nan")
 
-    ll_m = poisson_ll_noconst(y, mu)
-    ll_b = poisson_ll_noconst(y, mu0)
+    ll_m = poisson_ll_noconst(y, mu, sample_weight=sample_weight)
+    ll_b = poisson_ll_noconst(y, mu0, sample_weight=sample_weight)
     return ll_m - ll_b
 
 

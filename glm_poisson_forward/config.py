@@ -41,6 +41,10 @@ SPEED_N_BINS = 15
 ANGLE_N_BINS = 36  # roll/yaw/pitch bins
 MIN_SPEED_CM_S = 0.0  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
 
+# Soft-clipping weights for roll/pitch LL during forward search
+SOFT_CLIP_TAU = 0.15
+SOFT_CLIP_BETA = 5.0
+
 # Fitting-curve plots
 PLOT_SMOOTH_MS = 1000
 PLOT_START_SEC = 0.0

@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from .config import (
     ALPHA,
+    ANGLE_N_BINS,
     CV_FOLDS,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
@@ -21,6 +22,8 @@ from .config import (
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
+    SOFT_CLIP_BETA,
+    SOFT_CLIP_TAU,
     VARS_ALL,
     WEIGHTS_BASE,
 )
@@ -72,15 +75,62 @@ class StepRecord:
     accepted: bool = True
 
 
+@dataclass(frozen=True)
+class LlWeighting:
+    roll_bin: np.ndarray
+    pitch_bin: np.ndarray
+    roll_weights: np.ndarray
+    pitch_weights: np.ndarray
+
+
+def _soft_clip_bin_weights(
+    bin_idx: np.ndarray,
+    n_bins: int,
+    tau: float,
+    beta: float,
+) -> np.ndarray:
+    counts = np.bincount(bin_idx, minlength=n_bins).astype(np.float64)
+    total = float(np.sum(counts))
+    if total <= 0:
+        return np.ones(n_bins, dtype=np.float64)
+    p = counts / total
+    p = np.clip(p, 1e-12, None)
+    return 1.0 / (1.0 + np.exp(beta * (np.log(p) - np.log(tau))))
+
+
+def _build_ll_weighting(data_dict: Dict[str, np.ndarray]) -> LlWeighting:
+    roll_bin = data_dict["roll_bin"].astype(np.int64)
+    pitch_bin = data_dict["pitch_bin"].astype(np.int64)
+    roll_weights = _soft_clip_bin_weights(roll_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    pitch_weights = _soft_clip_bin_weights(pitch_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    return LlWeighting(
+        roll_bin=roll_bin,
+        pitch_bin=pitch_bin,
+        roll_weights=roll_weights,
+        pitch_weights=pitch_weights,
+    )
+
+
 def _delta_ll_cv_for_neuron(
     model_vars: List[str],
     neuron_idx: int,
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
+    ll_weighting: LlWeighting | None = None,
 ) -> Tuple[float, List[float]]:
     X_all_m, _feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
+
+    sample_weights = None
+    if ll_weighting is not None:
+        weight_terms = []
+        if "roll" in model_vars:
+            weight_terms.append(ll_weighting.roll_weights[ll_weighting.roll_bin])
+        if "pitch" in model_vars:
+            weight_terms.append(ll_weighting.pitch_weights[ll_weighting.pitch_bin])
+        if weight_terms:
+            sample_weights = np.sum(weight_terms, axis=0)
 
     fold_delta_ll: List[float] = []
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
@@ -90,12 +140,22 @@ def _delta_ll_cv_for_neuron(
         mean_tr = float(np.mean(y[tr]))
         base_rate = max(mean_tr, 1e-12)
         mu_base = np.full_like(y[va], base_rate, dtype=np.float64)
-        delta_ll = compute_delta_ll_poisson_vs_baseline(y[va], mu_va, mu_base)
+        delta_ll = compute_delta_ll_poisson_vs_baseline(
+            y[va],
+            mu_va,
+            mu_base,
+            sample_weight=None if sample_weights is None else sample_weights[va],
+        )
         fold_delta_ll.append(float(delta_ll))
         mu_oof[va] = mu_va
 
     mu_base_oof = build_oof_constant_mu(y, folds_idx)
-    delta_ll_oof = compute_delta_ll_poisson_vs_baseline(y, mu_oof, mu_base_oof)
+    delta_ll_oof = compute_delta_ll_poisson_vs_baseline(
+        y,
+        mu_oof,
+        mu_base_oof,
+        sample_weight=sample_weights,
+    )
     return float(delta_ll_oof), fold_delta_ll
 
 
@@ -129,6 +189,7 @@ def _forward_select_one_neuron(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     OUT_ROOT: Path,
     get_X_and_feats,
+    ll_weighting: LlWeighting | None,
 ):
     path_records: List[StepRecord] = []
     remaining = VARS_ALL.copy()
@@ -136,7 +197,7 @@ def _forward_select_one_neuron(
     single_candidates = []
     for v in remaining:
         oof_delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
-            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats
+            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats, ll_weighting=ll_weighting
         )
         single_candidates.append((v, oof_delta_ll, fold_delta_ll))
 
@@ -179,7 +240,12 @@ def _forward_select_one_neuron(
         for cand in remaining:
             trial_vars = selected + [cand]
             oof_delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
-                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats
+                trial_vars,
+                neuron_idx,
+                Y_all,
+                folds_idx,
+                get_X_and_feats,
+                ll_weighting=ll_weighting,
             )
             cand_list.append((cand, trial_vars, oof_delta_ll, fold_delta_ll))
 
@@ -219,7 +285,12 @@ def _forward_select_one_neuron(
     const_n = None
     if selected:
         _delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
-            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
+            selected,
+            neuron_idx,
+            Y_all,
+            folds_idx,
+            get_X_and_feats,
+            ll_weighting=ll_weighting,
         )
         const_stat, const_p, const_n = wilcoxon_greater(fold_delta_ll, b=None)
         if const_p >= ALPHA:
@@ -339,6 +410,7 @@ def run_one_session(
         data_dict = apply_residual_angle(data_dict, "pitch")
 
     T = int(data_dict["T"])
+    ll_weighting = _build_ll_weighting(data_dict)
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)
     folds_idx = list(kf.split(np.arange(T)))
 
@@ -356,7 +428,14 @@ def run_one_session(
     )
 
     results = Parallel(n_jobs=N_JOBS, backend="loky")(
-        delayed(_forward_select_one_neuron)(i, Y_all, folds_idx, OUT_ROOT, get_X_and_feats)
+        delayed(_forward_select_one_neuron)(
+            i,
+            Y_all,
+            folds_idx,
+            OUT_ROOT,
+            get_X_and_feats,
+            ll_weighting,
+        )
         for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Poisson)")
     )
 
