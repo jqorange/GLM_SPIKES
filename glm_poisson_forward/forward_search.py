@@ -35,7 +35,7 @@ from .io_utils import (
 )
 from .metrics import (
     build_oof_constant_mu,
-    compute_llhi_bps_poisson_vs_baseline,
+    compute_delta_ll_poisson_vs_baseline,
     wilcoxon_greater,
 )
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
@@ -64,15 +64,15 @@ def _build_design_cache(data_dict: Dict[str, np.ndarray]):
 class StepRecord:
     step: int
     model: List[str]
-    mean_llhi: float
-    fold_llhi: List[float]
+    mean_delta_ll: float
+    fold_delta_ll: List[float]
     p_value_vs_prev: float = None
     stat_vs_prev: float = None
     n_pairs: int = None
     accepted: bool = True
 
 
-def _llhi_cv_for_neuron(
+def _delta_ll_cv_for_neuron(
     model_vars: List[str],
     neuron_idx: int,
     Y_all: np.ndarray,
@@ -82,17 +82,21 @@ def _llhi_cv_for_neuron(
     X_all_m, _feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
-    fold_llhi: List[float] = []
+    fold_delta_ll: List[float] = []
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
-        fold_llhi.append(float(llhi))
+        mu_va, _llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
+        mean_tr = float(np.mean(y[tr]))
+        base_rate = max(mean_tr, 1e-12)
+        mu_base = np.full_like(y[va], base_rate, dtype=np.float64)
+        delta_ll = compute_delta_ll_poisson_vs_baseline(y[va], mu_va, mu_base)
+        fold_delta_ll.append(float(delta_ll))
         mu_oof[va] = mu_va
 
     mu_base_oof = build_oof_constant_mu(y, folds_idx)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y, mu_oof, mu_base_oof)
-    return float(llhi_oof), fold_llhi
+    delta_ll_oof = compute_delta_ll_poisson_vs_baseline(y, mu_oof, mu_base_oof)
+    return float(delta_ll_oof), fold_delta_ll
 
 
 def _save_accepted_step(
@@ -131,11 +135,13 @@ def _forward_select_one_neuron(
 
     single_candidates = []
     for v in remaining:
-        oof_llhi, fold_llhi = _llhi_cv_for_neuron([v], neuron_idx, Y_all, folds_idx, get_X_and_feats)
-        single_candidates.append((v, oof_llhi, fold_llhi))
+        oof_delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
+            [v], neuron_idx, Y_all, folds_idx, get_X_and_feats
+        )
+        single_candidates.append((v, oof_delta_ll, fold_delta_ll))
 
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
-    best_v, best_oof_llhi, best_fold = single_candidates[0]
+    best_v, best_oof_delta_ll, best_fold = single_candidates[0]
 
     stat, p, n = wilcoxon_greater(best_fold, b=None)
     accepted = (p < ALPHA)
@@ -144,8 +150,8 @@ def _forward_select_one_neuron(
         StepRecord(
             step=1,
             model=[best_v],
-            mean_llhi=best_oof_llhi,
-            fold_llhi=list(map(float, best_fold)),
+            mean_delta_ll=best_oof_delta_ll,
+            fold_delta_ll=list(map(float, best_fold)),
             p_value_vs_prev=p,
             stat_vs_prev=stat,
             n_pairs=n,
@@ -165,28 +171,30 @@ def _forward_select_one_neuron(
 
     selected = [best_v]
     remaining.remove(best_v)
-    fold_llhi_prev = list(best_fold)
+    fold_delta_ll_prev = list(best_fold)
 
     step = 2
     while remaining:
         cand_list = []
         for cand in remaining:
             trial_vars = selected + [cand]
-            oof_llhi, fold_llhi = _llhi_cv_for_neuron(trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats)
-            cand_list.append((cand, trial_vars, oof_llhi, fold_llhi))
+            oof_delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
+                trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats
+            )
+            cand_list.append((cand, trial_vars, oof_delta_ll, fold_delta_ll))
 
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
-        best_cand, best_trial_vars, best_trial_oof_llhi, best_trial_fold = cand_list[0]
+        best_cand, best_trial_vars, best_trial_oof_delta_ll, best_trial_fold = cand_list[0]
 
-        stat, p, n = wilcoxon_greater(best_trial_fold, fold_llhi_prev)
+        stat, p, n = wilcoxon_greater(best_trial_fold, fold_delta_ll_prev)
         accepted = (p < ALPHA)
 
         path_records.append(
             StepRecord(
                 step=step,
                 model=best_trial_vars,
-                mean_llhi=best_trial_oof_llhi,
-                fold_llhi=list(map(float, best_trial_fold)),
+                mean_delta_ll=best_trial_oof_delta_ll,
+                fold_delta_ll=list(map(float, best_trial_fold)),
                 p_value_vs_prev=p,
                 stat_vs_prev=stat,
                 n_pairs=n,
@@ -200,7 +208,7 @@ def _forward_select_one_neuron(
         _save_accepted_step(neuron_idx, best_trial_vars, OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
         selected = best_trial_vars
         remaining.remove(best_cand)
-        fold_llhi_prev = list(best_trial_fold)
+        fold_delta_ll_prev = list(best_trial_fold)
         step += 1
 
         if len(selected) == len(VARS_ALL):
@@ -210,8 +218,10 @@ def _forward_select_one_neuron(
     const_stat = None
     const_n = None
     if selected:
-        _llhi, fold_llhi = _llhi_cv_for_neuron(selected, neuron_idx, Y_all, folds_idx, get_X_and_feats)
-        const_stat, const_p, const_n = wilcoxon_greater(fold_llhi, b=None)
+        _delta_ll, fold_delta_ll = _delta_ll_cv_for_neuron(
+            selected, neuron_idx, Y_all, folds_idx, get_X_and_feats
+        )
+        const_stat, const_p, const_n = wilcoxon_greater(fold_delta_ll, b=None)
         if const_p >= ALPHA:
             return {
                 "neuron": f"neuron_{neuron_idx+1}",
@@ -253,8 +263,11 @@ def _plot_selected_models(
             y_full = Y_all[:, neuron_idx].astype(np.float64)
             y_oof, mu_oof = load_oof_from_neuron_dir(neuron_dir)
             mu_base_oof = build_oof_constant_mu(y_full, folds_idx)
-            llhi = compute_llhi_bps_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
-            title = f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | ΔLL={llhi:.4f} bits/spk"
+            delta_ll = compute_delta_ll_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
+            title = (
+                f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | "
+                f"ΔLL={delta_ll:.4f}"
+            )
             out_png = fig_dir / f"{neuron_name}__{model_key}.png"
             plot_fitting_curve(
                 out_png,
