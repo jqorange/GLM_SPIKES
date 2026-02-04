@@ -146,6 +146,9 @@ def _delta_ll_cv_for_neuron(
                 weight_terms.append(ll_weighting.weights[var][ll_weighting.bin_index[var]])
         if weight_terms:
             sample_weights = np.sum(weight_terms, axis=0)
+            mean_weight = float(np.mean(sample_weights))
+            if mean_weight > 0:
+                sample_weights = sample_weights / mean_weight
 
     fold_delta_ll: List[float] = []
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
