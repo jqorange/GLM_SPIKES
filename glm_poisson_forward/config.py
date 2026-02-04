@@ -32,6 +32,10 @@ ALPHA = 0.05
 MAX_ITER = 500
 POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
 
+# Smoothness regularization (pseudo-observation trick)
+SMOOTH_LAMBDA = 0.0  # set >0 to enable, acts on first-difference rows per feature group
+SMOOTH_VARS = ["Position", "Speed", "roll", "yaw", "pitch"]
+
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 

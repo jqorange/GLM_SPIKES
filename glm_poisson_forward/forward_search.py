@@ -78,14 +78,14 @@ def _llhi_cv_for_neuron(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
 ) -> Tuple[float, List[float]]:
-    X_all_m, _feat = get_X_and_feats(model_vars)
+    X_all_m, feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
     fold_llhi: List[float] = []
     mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va)
+        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
         fold_llhi.append(float(llhi))
         mu_oof[va] = mu_va
 

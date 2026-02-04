@@ -1,11 +1,11 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy import sparse
 from sklearn.preprocessing import OneHotEncoder
 
-from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS
+from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDA, SMOOTH_VARS
 
 
 def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
@@ -86,6 +86,61 @@ def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarra
     return X_cat, feature_names
 
 
+def build_smoothness_rows(
+    feature_names: List[str],
+    *,
+    smooth_lambda: Optional[float] = None,
+    smooth_vars: Optional[List[str]] = None,
+) -> sparse.csr_matrix:
+    if smooth_lambda is None:
+        smooth_lambda = SMOOTH_LAMBDA
+    if smooth_vars is None:
+        smooth_vars = SMOOTH_VARS
+    n_features = len(feature_names)
+    if feature_names and feature_names[-1] == "intercept":
+        n_features -= 1
+    if smooth_lambda <= 0 or not smooth_vars or n_features <= 0:
+        return sparse.csr_matrix((0, n_features), dtype=np.float32)
+
+    var_to_prefix = {
+        "Position": "position",
+        "Speed": "head_v",
+        "roll": "roll",
+        "yaw": "yaw",
+        "pitch": "pitch",
+    }
+
+    sqrt_lambda = float(np.sqrt(smooth_lambda))
+    rows = []
+    cols = []
+    data = []
+    row_idx = 0
+    feature_prefixes = feature_names[:n_features]
+
+    for var in smooth_vars:
+        prefix = var_to_prefix.get(var, var)
+        idx = [
+            i
+            for i, name in enumerate(feature_prefixes)
+            if name.startswith(f"{prefix}_")
+        ]
+        if len(idx) < 2:
+            continue
+        for j in range(len(idx) - 1):
+            rows.extend([row_idx, row_idx])
+            cols.extend([idx[j], idx[j + 1]])
+            data.extend([-sqrt_lambda, sqrt_lambda])
+            row_idx += 1
+
+    if row_idx == 0:
+        return sparse.csr_matrix((0, n_features), dtype=np.float32)
+    smooth_rows = sparse.coo_matrix(
+        (np.asarray(data, dtype=np.float32), (np.asarray(rows), np.asarray(cols))),
+        shape=(row_idx, n_features),
+    ).tocsr()
+    return smooth_rows
+
+
 def ensure_feature_mapping(model_dir: str, feature_names: List[str]):
     import os
 
@@ -98,4 +153,3 @@ def ensure_feature_mapping(model_dir: str, feature_names: List[str]):
 
 def model_key_from_vars(var_list: List[str]) -> str:
     return "_".join(var_list)
-
