@@ -15,6 +15,7 @@ from .config import (
     ALPHA,
     ANGLE_N_BINS,
     CV_FOLDS,
+    LL_WEIGHTED_VARS,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
@@ -22,6 +23,7 @@ from .config import (
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
+    SPEED_N_BINS,
     SOFT_CLIP_BETA,
     SOFT_CLIP_TAU,
     VARS_ALL,
@@ -77,10 +79,8 @@ class StepRecord:
 
 @dataclass(frozen=True)
 class LlWeighting:
-    roll_bin: np.ndarray
-    pitch_bin: np.ndarray
-    roll_weights: np.ndarray
-    pitch_weights: np.ndarray
+    bin_index: Dict[str, np.ndarray]
+    weights: Dict[str, np.ndarray]
 
 
 def _soft_clip_bin_weights(
@@ -99,16 +99,32 @@ def _soft_clip_bin_weights(
 
 
 def _build_ll_weighting(data_dict: Dict[str, np.ndarray]) -> LlWeighting:
-    roll_bin = data_dict["roll_bin"].astype(np.int64)
-    pitch_bin = data_dict["pitch_bin"].astype(np.int64)
-    roll_weights = _soft_clip_bin_weights(roll_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
-    pitch_weights = _soft_clip_bin_weights(pitch_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
-    return LlWeighting(
-        roll_bin=roll_bin,
-        pitch_bin=pitch_bin,
-        roll_weights=roll_weights,
-        pitch_weights=pitch_weights,
-    )
+    bin_index: Dict[str, np.ndarray] = {}
+    weights: Dict[str, np.ndarray] = {}
+
+    if "roll" in LL_WEIGHTED_VARS:
+        roll_bin = data_dict["roll_bin"].astype(np.int64)
+        bin_index["roll"] = roll_bin
+        weights["roll"] = _soft_clip_bin_weights(roll_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    if "pitch" in LL_WEIGHTED_VARS:
+        pitch_bin = data_dict["pitch_bin"].astype(np.int64)
+        bin_index["pitch"] = pitch_bin
+        weights["pitch"] = _soft_clip_bin_weights(pitch_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    if "yaw" in LL_WEIGHTED_VARS:
+        yaw_bin = data_dict["yaw_bin"].astype(np.int64)
+        bin_index["yaw"] = yaw_bin
+        weights["yaw"] = _soft_clip_bin_weights(yaw_bin, ANGLE_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    if "Speed" in LL_WEIGHTED_VARS:
+        speed_bin = data_dict["head_v_bin"].astype(np.int64)
+        bin_index["Speed"] = speed_bin
+        weights["Speed"] = _soft_clip_bin_weights(speed_bin, SPEED_N_BINS, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+    if "Position" in LL_WEIGHTED_VARS:
+        position_bin = data_dict["position"].astype(np.int64)
+        n_pos = int(data_dict["n_pos"])
+        bin_index["Position"] = position_bin
+        weights["Position"] = _soft_clip_bin_weights(position_bin, n_pos, SOFT_CLIP_TAU, SOFT_CLIP_BETA)
+
+    return LlWeighting(bin_index=bin_index, weights=weights)
 
 
 def _delta_ll_cv_for_neuron(
@@ -125,10 +141,9 @@ def _delta_ll_cv_for_neuron(
     sample_weights = None
     if ll_weighting is not None:
         weight_terms = []
-        if "roll" in model_vars:
-            weight_terms.append(ll_weighting.roll_weights[ll_weighting.roll_bin])
-        if "pitch" in model_vars:
-            weight_terms.append(ll_weighting.pitch_weights[ll_weighting.pitch_bin])
+        for var in model_vars:
+            if var in ll_weighting.weights:
+                weight_terms.append(ll_weighting.weights[var][ll_weighting.bin_index[var]])
         if weight_terms:
             sample_weights = np.sum(weight_terms, axis=0)
 
