@@ -8,6 +8,7 @@ from .config import (
     AGG_FACTOR,
     ANGLE_N_BINS,
     DLC_ROOT,
+    FS_HZ,
     IMU_ROOT,
     POSITION_ROOT,
     SPEED_N_BINS,
@@ -122,9 +123,15 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     roll_vals = imu_df["roll"].values.astype(np.float32)
     yaw_vals = imu_df["yaw"].values.astype(np.float32)
     pitch_vals = imu_df["pitch"].values.astype(np.float32)
+    roll_d_vals = np.gradient(np.unwrap(roll_vals), edge_order=1) * FS_HZ
+    yaw_d_vals = np.gradient(np.unwrap(yaw_vals), edge_order=1) * FS_HZ
+    pitch_d_vals = np.gradient(np.unwrap(pitch_vals), edge_order=1) * FS_HZ
     roll_bin = bin_col(roll_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     yaw_bin = bin_col(yaw_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
     pitch_bin = bin_col(pitch_vals, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    roll_d_bin = bin_col(roll_d_vals, n_bins=ANGLE_N_BINS)
+    yaw_d_bin = bin_col(yaw_d_vals, n_bins=ANGLE_N_BINS)
+    pitch_d_bin = bin_col(pitch_d_vals, n_bins=ANGLE_N_BINS)
 
     return {
         "T": int(L),
@@ -135,9 +142,15 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
         "roll": roll_vals,
         "yaw": yaw_vals,
         "pitch": pitch_vals,
+        "roll_d": roll_d_vals.astype(np.float32),
+        "yaw_d": yaw_d_vals.astype(np.float32),
+        "pitch_d": pitch_d_vals.astype(np.float32),
         "roll_bin": roll_bin.astype(np.int32),
         "yaw_bin": yaw_bin.astype(np.int32),
         "pitch_bin": pitch_bin.astype(np.int32),
+        "roll_d_bin": roll_d_bin.astype(np.int32),
+        "yaw_d_bin": yaw_d_bin.astype(np.int32),
+        "pitch_d_bin": pitch_d_bin.astype(np.int32),
     }
 
 

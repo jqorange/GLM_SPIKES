@@ -319,9 +319,15 @@ def run_one_session(
         "roll",
         "yaw",
         "pitch",
+        "roll_d",
+        "yaw_d",
+        "pitch_d",
         "roll_bin",
         "yaw_bin",
         "pitch_bin",
+        "roll_d_bin",
+        "yaw_d_bin",
+        "pitch_d_bin",
     ]:
         data_dict[k] = data_dict[k][:T]
     Y_all = Y50[:T].astype(np.float64)
@@ -333,10 +339,13 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
     if use_residual_roll:
         data_dict = apply_residual_angle(data_dict, "roll")
+        data_dict = apply_residual_angle(data_dict, "roll_d")
     if use_residual_yaw:
         data_dict = apply_residual_angle(data_dict, "yaw")
+        data_dict = apply_residual_angle(data_dict, "yaw_d")
     if use_residual_pitch:
         data_dict = apply_residual_angle(data_dict, "pitch")
+        data_dict = apply_residual_angle(data_dict, "pitch_d")
 
     T = int(data_dict["T"])
     kf = KFold(n_splits=CV_FOLDS, shuffle=False)

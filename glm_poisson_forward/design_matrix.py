@@ -58,6 +58,9 @@ def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarra
             cols.append(data_dict[f"{ang}_bin"].astype(np.int32))
             cats.append(np.arange(ANGLE_N_BINS, dtype=int))
             order.append(ang)
+            cols.append(data_dict[f"{ang}_d_bin"].astype(np.int32))
+            cats.append(np.arange(ANGLE_N_BINS, dtype=int))
+            order.append(f"{ang}_d")
 
     if len(cols) == 0:
         X_zero = sparse.csr_matrix((len(data_dict["position"]), 0), dtype=np.float32)
@@ -98,4 +101,3 @@ def ensure_feature_mapping(model_dir: str, feature_names: List[str]):
 
 def model_key_from_vars(var_list: List[str]) -> str:
     return "_".join(var_list)
-
