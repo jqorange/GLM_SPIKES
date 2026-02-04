@@ -5,7 +5,7 @@ import pandas as pd
 from scipy import sparse
 from sklearn.preprocessing import OneHotEncoder
 
-from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDA, SMOOTH_VARS
+from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDAS, SMOOTH_VARS
 
 
 def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
@@ -91,15 +91,18 @@ def build_smoothness_rows(
     *,
     smooth_lambda: Optional[float] = None,
     smooth_vars: Optional[List[str]] = None,
+    smooth_lambdas: Optional[Dict[str, float]] = None,
 ) -> sparse.csr_matrix:
-    if smooth_lambda is None:
-        smooth_lambda = SMOOTH_LAMBDA
+    if smooth_lambdas is None:
+        smooth_lambdas = SMOOTH_LAMBDAS
     if smooth_vars is None:
         smooth_vars = SMOOTH_VARS
     n_features = len(feature_names)
     if feature_names and feature_names[-1] == "intercept":
         n_features -= 1
-    if smooth_lambda <= 0 or not smooth_vars or n_features <= 0:
+    if smooth_lambda is not None and smooth_lambda <= 0 and not smooth_lambdas:
+        return sparse.csr_matrix((0, n_features), dtype=np.float32)
+    if not smooth_vars or n_features <= 0:
         return sparse.csr_matrix((0, n_features), dtype=np.float32)
 
     var_to_prefix = {
@@ -110,7 +113,6 @@ def build_smoothness_rows(
         "pitch": "pitch",
     }
 
-    sqrt_lambda = float(np.sqrt(smooth_lambda))
     rows = []
     cols = []
     data = []
@@ -118,6 +120,12 @@ def build_smoothness_rows(
     feature_prefixes = feature_names[:n_features]
 
     for var in smooth_vars:
+        lambda_val = smooth_lambda
+        if smooth_lambdas is not None:
+            lambda_val = smooth_lambdas.get(var, lambda_val)
+        if lambda_val is None or lambda_val <= 0:
+            continue
+        sqrt_lambda = float(np.sqrt(lambda_val))
         prefix = var_to_prefix.get(var, var)
         idx = [
             i
