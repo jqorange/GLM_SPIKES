@@ -14,6 +14,7 @@ from tqdm import tqdm
 from .config import (
     ALPHA,
     CV_FOLDS,
+    ANGLE_N_BINS,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
@@ -329,6 +330,11 @@ def run_one_session(
     if speed_mask is not None and not speed_mask.any():
         return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
 
+    rng = np.random.default_rng(0)
+    data_dict, Y_all, subsample_msg = _subsample_outdoor_angles_to_indoor(session, data_dict, Y_all, rng)
+    if subsample_msg:
+        print(f"[{session}] {subsample_msg}")
+
     if use_residual_speed:
         data_dict = apply_residual_speed(data_dict)
     if use_residual_roll:
@@ -383,3 +389,96 @@ def run_one_session(
         f.write(f"OK\t{datetime.now().isoformat(timespec='seconds')}\n")
 
     return True, f"OK (T50={T}, N={N_NEURONS})"
+
+
+def _apply_index_subsample(
+    data_dict: Dict[str, np.ndarray],
+    Y_all: np.ndarray,
+    keep_idx: np.ndarray,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    base_len = int(data_dict.get("T", keep_idx.size))
+    filtered = {}
+    for k, v in data_dict.items():
+        if isinstance(v, np.ndarray) and v.shape[0] == base_len:
+            filtered[k] = v[keep_idx]
+        else:
+            filtered[k] = v
+    filtered["T"] = int(keep_idx.size)
+    return filtered, Y_all[keep_idx]
+
+
+def _subsample_outdoor_angles_to_indoor(
+    session: str,
+    data_dict: Dict[str, np.ndarray],
+    Y_all: np.ndarray,
+    rng: np.random.Generator,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, str | None]:
+    if not session.endswith("_outdoor"):
+        return data_dict, Y_all, None
+
+    indoor_session = f"{session[: -len('_outdoor')]}_indoor"
+    indoor_paths = session_paths(indoor_session)
+    if not all(indoor_paths[k].exists() for k in ["imu", "spike", "dlc_final", "position"]):
+        return data_dict, Y_all, f"Skip subsample: missing indoor inputs for {indoor_session}"
+
+    indoor_dict = rebuild_inputs_50hz(indoor_session, indoor_paths)
+    Y50_indoor = load_spikes_50hz_counts(indoor_paths["spike"])
+    T_spk, _ = Y50_indoor.shape
+    T_cov = int(indoor_dict["T"])
+    T_indoor = min(T_cov, T_spk)
+    for k in [
+        "position",
+        "head_v",
+        "head_v_bin",
+        "roll",
+        "yaw",
+        "pitch",
+        "roll_bin",
+        "yaw_bin",
+        "pitch_bin",
+    ]:
+        indoor_dict[k] = indoor_dict[k][:T_indoor]
+    indoor_dict, _Y_indoor, _mask = filter_by_min_speed(indoor_dict, Y50_indoor[:T_indoor], MIN_SPEED_CM_S)
+
+    indoor_bins = (
+        indoor_dict["roll_bin"] * (ANGLE_N_BINS * ANGLE_N_BINS)
+        + indoor_dict["yaw_bin"] * ANGLE_N_BINS
+        + indoor_dict["pitch_bin"]
+    )
+    outdoor_bins = (
+        data_dict["roll_bin"] * (ANGLE_N_BINS * ANGLE_N_BINS)
+        + data_dict["yaw_bin"] * ANGLE_N_BINS
+        + data_dict["pitch_bin"]
+    )
+    n_joint = ANGLE_N_BINS**3
+    indoor_counts = np.bincount(indoor_bins, minlength=n_joint)
+    outdoor_counts = np.bincount(outdoor_bins, minlength=n_joint)
+
+    valid = (indoor_counts > 0) & (outdoor_counts > 0)
+    ratios = outdoor_counts[valid] / indoor_counts[valid]
+    if ratios.size == 0:
+        return data_dict, Y_all, f"Skip subsample: no overlapping roll/yaw/pitch bins for {indoor_session}"
+
+    alpha = min(1.0, float(ratios.min()))
+    target_counts = np.floor(indoor_counts * alpha).astype(int)
+    target_bins = np.nonzero(target_counts)[0]
+    if target_bins.size == 0:
+        return data_dict, Y_all, f"Skip subsample: target counts empty for {indoor_session}"
+
+    keep_indices = []
+    for b in target_bins:
+        idx = np.flatnonzero(outdoor_bins == b)
+        n_keep = target_counts[b]
+        if n_keep <= 0:
+            continue
+        if idx.size <= n_keep:
+            keep_indices.append(idx)
+        else:
+            keep_indices.append(rng.choice(idx, size=n_keep, replace=False))
+    if not keep_indices:
+        return data_dict, Y_all, f"Skip subsample: no indices selected for {indoor_session}"
+
+    keep_idx = np.sort(np.concatenate(keep_indices))
+    data_dict, Y_all = _apply_index_subsample(data_dict, Y_all, keep_idx)
+    msg = f"Subsampled outdoor to match indoor roll/yaw/pitch distribution: kept {keep_idx.size}/{outdoor_bins.size}"
+    return data_dict, Y_all, msg
