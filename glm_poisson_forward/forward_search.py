@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, ShuffleSplit
 from tqdm import tqdm
 
 from .config import (
@@ -21,6 +21,7 @@ from .config import (
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
+    SEED,
     VARS_ALL,
     WEIGHTS_BASE,
 )
@@ -76,7 +77,6 @@ def _llhi_cv_for_neuron(
     neuron_idx: int,
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
-    eval_idx: np.ndarray,
     get_X_and_feats,
 ) -> Tuple[float, List[float]]:
     X_all_m, feat = get_X_and_feats(model_vars)
@@ -84,8 +84,8 @@ def _llhi_cv_for_neuron(
 
     fold_llhi: List[float] = []
 
-    for (tr, _va) in folds_idx:
-        _mu_val, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, eval_idx, feat)
+    for (tr, va) in folds_idx:
+        _mu_val, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
         fold_llhi.append(float(llhi))
 
     mean_llhi = float(np.nanmean(fold_llhi)) if fold_llhi else float("nan")
@@ -121,7 +121,6 @@ def _forward_select_one_neuron(
     Y_all: np.ndarray,
     folds_idx_train: List[Tuple[np.ndarray, np.ndarray]],
     folds_idx_full: List[Tuple[np.ndarray, np.ndarray]],
-    val_idx: np.ndarray,
     OUT_ROOT: Path,
     get_X_and_feats,
 ):
@@ -135,7 +134,6 @@ def _forward_select_one_neuron(
             neuron_idx,
             Y_all,
             folds_idx_train,
-            val_idx,
             get_X_and_feats,
         )
         single_candidates.append((v, oof_llhi, fold_llhi))
@@ -183,7 +181,6 @@ def _forward_select_one_neuron(
                 neuron_idx,
                 Y_all,
                 folds_idx_train,
-                val_idx,
                 get_X_and_feats,
             )
             cand_list.append((cand, trial_vars, oof_llhi, fold_llhi))
@@ -235,7 +232,6 @@ def _forward_select_one_neuron(
             neuron_idx,
             Y_all,
             folds_idx_train,
-            val_idx,
             get_X_and_feats,
         )
         const_stat, const_p, const_n = wilcoxon_greater(fold_llhi, b=None)
@@ -334,11 +330,8 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
-    split_idx = int(T * 0.7)
-    train_idx = np.arange(T)[:split_idx]
-    val_idx = np.arange(T)[split_idx:]
-    kf_train = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx_train = [(train_idx[tr], train_idx[va]) for tr, va in kf_train.split(train_idx)]
+    splitter = ShuffleSplit(n_splits=CV_FOLDS, test_size=0.3, random_state=SEED)
+    folds_idx_train = list(splitter.split(np.arange(T)))
     kf_full = KFold(n_splits=CV_FOLDS, shuffle=False)
     folds_idx_full = list(kf_full.split(np.arange(T)))
 
@@ -361,7 +354,6 @@ def run_one_session(
             Y_all,
             folds_idx_train,
             folds_idx_full,
-            val_idx,
             OUT_ROOT,
             get_X_and_feats,
         )
