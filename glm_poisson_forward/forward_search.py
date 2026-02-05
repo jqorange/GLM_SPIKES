@@ -76,29 +76,27 @@ def _llhi_cv_for_neuron(
     neuron_idx: int,
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+    eval_idx: np.ndarray,
     get_X_and_feats,
 ) -> Tuple[float, List[float]]:
     X_all_m, feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
     fold_llhi: List[float] = []
-    mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
-    for (tr, va) in folds_idx:
-        mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
+    for (tr, _va) in folds_idx:
+        _mu_val, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, eval_idx, feat)
         fold_llhi.append(float(llhi))
-        mu_oof[va] = mu_va
 
-    mu_base_oof = build_oof_constant_mu(y, folds_idx)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y, mu_oof, mu_base_oof)
-    return float(llhi_oof), fold_llhi
+    mean_llhi = float(np.nanmean(fold_llhi)) if fold_llhi else float("nan")
+    return mean_llhi, fold_llhi
 
 
 def _save_accepted_step(
     neuron_idx: int,
     model_vars: List[str],
     OUT_ROOT: Path,
-    folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+    folds_idx_full: List[Tuple[np.ndarray, np.ndarray]],
     Y_all: np.ndarray,
     get_X_and_feats,
 ):
@@ -111,7 +109,7 @@ def _save_accepted_step(
         model_dir=model_dir,
         neuron_dir=neuron_dir,
         neuron_index=neuron_idx,
-        folds=folds_idx,
+        folds=folds_idx_full,
         X_all=X_all_m,
         y_all=y,
         feature_names=feat_names,
@@ -121,7 +119,9 @@ def _save_accepted_step(
 def _forward_select_one_neuron(
     neuron_idx: int,
     Y_all: np.ndarray,
-    folds_idx: List[Tuple[np.ndarray, np.ndarray]],
+    folds_idx_train: List[Tuple[np.ndarray, np.ndarray]],
+    folds_idx_full: List[Tuple[np.ndarray, np.ndarray]],
+    val_idx: np.ndarray,
     OUT_ROOT: Path,
     get_X_and_feats,
 ):
@@ -130,7 +130,14 @@ def _forward_select_one_neuron(
 
     single_candidates = []
     for v in remaining:
-        oof_llhi, fold_llhi = _llhi_cv_for_neuron([v], neuron_idx, Y_all, folds_idx, get_X_and_feats)
+        oof_llhi, fold_llhi = _llhi_cv_for_neuron(
+            [v],
+            neuron_idx,
+            Y_all,
+            folds_idx_train,
+            val_idx,
+            get_X_and_feats,
+        )
         single_candidates.append((v, oof_llhi, fold_llhi))
 
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
@@ -160,7 +167,7 @@ def _forward_select_one_neuron(
             "path": [vars(s) for s in path_records],
         }
 
-    _save_accepted_step(neuron_idx, [best_v], OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
+    _save_accepted_step(neuron_idx, [best_v], OUT_ROOT, folds_idx_full, Y_all, get_X_and_feats)
 
     selected = [best_v]
     remaining.remove(best_v)
@@ -171,7 +178,14 @@ def _forward_select_one_neuron(
         cand_list = []
         for cand in remaining:
             trial_vars = selected + [cand]
-            oof_llhi, fold_llhi = _llhi_cv_for_neuron(trial_vars, neuron_idx, Y_all, folds_idx, get_X_and_feats)
+            oof_llhi, fold_llhi = _llhi_cv_for_neuron(
+                trial_vars,
+                neuron_idx,
+                Y_all,
+                folds_idx_train,
+                val_idx,
+                get_X_and_feats,
+            )
             cand_list.append((cand, trial_vars, oof_llhi, fold_llhi))
 
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
@@ -196,7 +210,14 @@ def _forward_select_one_neuron(
         if not accepted:
             break
 
-        _save_accepted_step(neuron_idx, best_trial_vars, OUT_ROOT, folds_idx, Y_all, get_X_and_feats)
+        _save_accepted_step(
+            neuron_idx,
+            best_trial_vars,
+            OUT_ROOT,
+            folds_idx_full,
+            Y_all,
+            get_X_and_feats,
+        )
         selected = best_trial_vars
         remaining.remove(best_cand)
         fold_llhi_prev = list(best_trial_fold)
@@ -209,7 +230,14 @@ def _forward_select_one_neuron(
     const_stat = None
     const_n = None
     if selected:
-        _llhi, fold_llhi = _llhi_cv_for_neuron(selected, neuron_idx, Y_all, folds_idx, get_X_and_feats)
+        _llhi, fold_llhi = _llhi_cv_for_neuron(
+            selected,
+            neuron_idx,
+            Y_all,
+            folds_idx_train,
+            val_idx,
+            get_X_and_feats,
+        )
         const_stat, const_p, const_n = wilcoxon_greater(fold_llhi, b=None)
         if const_p >= ALPHA:
             return {
@@ -306,8 +334,13 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
-    kf = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx = list(kf.split(np.arange(T)))
+    split_idx = int(T * 0.7)
+    train_idx = np.arange(T)[:split_idx]
+    val_idx = np.arange(T)[split_idx:]
+    kf_train = KFold(n_splits=CV_FOLDS, shuffle=False)
+    folds_idx_train = [(train_idx[tr], train_idx[va]) for tr, va in kf_train.split(train_idx)]
+    kf_full = KFold(n_splits=CV_FOLDS, shuffle=False)
+    folds_idx_full = list(kf_full.split(np.arange(T)))
 
     get_X_and_feats = _build_design_cache(data_dict)
 
@@ -318,12 +351,20 @@ def run_one_session(
         X_all=X_full,
         feature_names=feats_full,
         Y_all=Y_all,
-        folds_idx=folds_idx,
+        folds_idx=folds_idx_full,
         n_jobs=N_JOBS,
     )
 
     results = Parallel(n_jobs=N_JOBS, backend="loky")(
-        delayed(_forward_select_one_neuron)(i, Y_all, folds_idx, OUT_ROOT, get_X_and_feats)
+        delayed(_forward_select_one_neuron)(
+            i,
+            Y_all,
+            folds_idx_train,
+            folds_idx_full,
+            val_idx,
+            OUT_ROOT,
+            get_X_and_feats,
+        )
         for i in tqdm(range(N_NEURONS), desc=f"{session} | forward search (Poisson)")
     )
 
@@ -344,7 +385,7 @@ def run_one_session(
         for n in unclassified:
             f.write(n + "\n")
 
-    _plot_selected_models(rows, OUT_ROOT, session, Y_all, folds_idx)
+    _plot_selected_models(rows, OUT_ROOT, session, Y_all, folds_idx_full)
 
     with open(OUT_ROOT / "_SUCCESS", "w", encoding="utf-8") as f:
         f.write(f"OK\t{datetime.now().isoformat(timespec='seconds')}\n")
