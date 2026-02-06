@@ -8,7 +8,15 @@ import numpy as np
 
 from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 
-from .config import ANGLE_N_BINS, SPEED_MAX_M_S, SPEED_MIN_M_S
+from .config import (
+    PITCH_N_BINS,
+    ROLL_N_BINS,
+    ROLL_PITCH_TRIM_PERCENTILES,
+    SPEED_MAX_M_S,
+    SPEED_MIN_M_S,
+    YAW_N_BINS,
+)
+from .tuning_scores import AngleBinningRanges
 
 
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
@@ -84,7 +92,6 @@ def plot_neuron_summary(
     neuron_idx: int,
     aux: Dict[str, np.ndarray],
 ) -> None:
-    theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
     title_bits = f"Neuron {neuron_idx}"
     _plot_single_speed(
         out_dir / "speed.png",
@@ -94,21 +101,21 @@ def plot_neuron_summary(
 
     plot_polar_curve(
         out_dir / "yaw.png",
-        theta_deg,
+        np.linspace(0.0, 360.0, len(aux["hd_curve"]), endpoint=False),
         aux["hd_curve"],
         f"Neuron {neuron_idx} | yaw tuning",
         color="#1f77b4",
     )
     plot_polar_curve(
         out_dir / "roll.png",
-        theta_deg,
+        np.linspace(0.0, 360.0, len(aux["roll_curve"]), endpoint=False),
         aux["roll_curve"],
         f"Neuron {neuron_idx} | roll tuning",
         color="#ff7f0e",
     )
     plot_polar_curve(
         out_dir / "pitch.png",
-        theta_deg,
+        np.linspace(0.0, 360.0, len(aux["pitch_curve"]), endpoint=False),
         aux["pitch_curve"],
         f"Neuron {neuron_idx} | pitch tuning",
         color="#2ca02c",
@@ -162,12 +169,24 @@ def plot_paired_polar_curve(
     plt.close()
 
 
-def binning_note(out_path: Path) -> None:
+def binning_note(out_path: Path, *, angle_ranges: AngleBinningRanges | None = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    lower_pct, upper_pct = ROLL_PITCH_TRIM_PERCENTILES
+    roll_line = f"- Roll bins: {ROLL_N_BINS} bins"
+    pitch_line = f"- Pitch bins: {PITCH_N_BINS} bins"
+    if angle_ranges is not None:
+        roll_min = angle_ranges.roll_start
+        roll_max = angle_ranges.roll_start + angle_ranges.roll_width
+        pitch_min = angle_ranges.pitch_start
+        pitch_max = angle_ranges.pitch_start + angle_ranges.pitch_width
+        roll_line += f" on [{roll_min:.3f}, {roll_max:.3f}) rad (trim {lower_pct:g}–{upper_pct:g} pct)"
+        pitch_line += f" on [{pitch_min:.3f}, {pitch_max:.3f}) rad (trim {lower_pct:g}–{upper_pct:g} pct)"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(
             "Traditional tuning curves use these binning rules:\n"
             f"- Position bins: {POSITION_CELL_CM:.1f} cm square\n"
             f"- Speed bins: {SPEED_N_BINS} bins on [0, 1.5] m/s\n"
-            f"- Angle bins (roll/yaw/pitch): {ANGLE_N_BINS} bins on [0, 2π) rad\n"
+            f"- Yaw bins: {YAW_N_BINS} bins on [0, 2π) rad\n"
+            f"{roll_line}\n"
+            f"{pitch_line}\n"
         )

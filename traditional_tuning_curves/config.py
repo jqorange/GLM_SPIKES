@@ -40,8 +40,13 @@ EQUALIZE_POLAR_AREA = False
 RESCORE_MODE = "scores"
 
 # Angular binning (degrees per bin)
-ANGLE_BIN_DEG = 3.0
-ANGLE_N_BINS = int(round(360.0 / ANGLE_BIN_DEG))
+ROLL_BIN_DEG = 3.0
+YAW_BIN_DEG = 3.0
+PITCH_BIN_DEG = 3.0
+ROLL_N_BINS = int(round(360.0 / ROLL_BIN_DEG))
+YAW_N_BINS = int(round(360.0 / YAW_BIN_DEG))
+PITCH_N_BINS = int(round(360.0 / PITCH_BIN_DEG))
+ROLL_PITCH_TRIM_PERCENTILES = (1.0, 99.0)
 
 # Parallelism
 N_WORKERS = 28

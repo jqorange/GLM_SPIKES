@@ -11,12 +11,14 @@ from .config import (
     N_WORKERS,
     OUT_ROOT,
     RESCORE_MODE,
+    ROLL_PITCH_TRIM_PERCENTILES,
     SCORE_PERCENTILES,
     SHUFFLE_N,
 )
-from .io_utils import list_sessions_all, load_session_raw
+from .io_utils import list_sessions_all, load_roll_pitch_angles, load_session_raw
 from .plotting import binning_note, plot_neuron_summary, plot_paired_polar_curve, plot_paired_speed_curve
 from .tuning_scores import (
+    AngleBinningRanges,
     ScoreResult,
     SessionBinning,
     TuningInputs,
@@ -24,6 +26,7 @@ from .tuning_scores import (
     compute_shuffle_scores,
     build_bins,
 )
+from glm_poisson_forward.angle_utils import circular_trim_range
 from contribution_rllr_utils import build_dayid_to_cellinfo, pyramidal_indices_for_session
 
 
@@ -125,26 +128,28 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
     curves_b = _load_polar_curves(neuron_dir_b)
     if curves_a is None or curves_b is None:
         return
-    theta_deg = np.linspace(0.0, 360.0, len(curves_a["hd_curve"]), endpoint=False)
+    yaw_theta = np.linspace(0.0, 360.0, len(curves_a["hd_curve"]), endpoint=False)
     plot_paired_polar_curve(
         neuron_dir_a / "yaw_indoor_outdoor.png",
-        theta_deg,
+        yaw_theta,
         curves_a["hd_curve"],
         curves_b["hd_curve"],
         "Yaw tuning (indoor vs outdoor)",
         equalize_area=EQUALIZE_POLAR_AREA,
     )
+    roll_theta = np.linspace(0.0, 360.0, len(curves_a["roll_curve"]), endpoint=False)
     plot_paired_polar_curve(
         neuron_dir_a / "roll_indoor_outdoor.png",
-        theta_deg,
+        roll_theta,
         curves_a["roll_curve"],
         curves_b["roll_curve"],
         "Roll tuning (indoor vs outdoor)",
         equalize_area=EQUALIZE_POLAR_AREA,
     )
+    pitch_theta = np.linspace(0.0, 360.0, len(curves_a["pitch_curve"]), endpoint=False)
     plot_paired_polar_curve(
         neuron_dir_a / "pitch_indoor_outdoor.png",
-        theta_deg,
+        pitch_theta,
         curves_a["pitch_curve"],
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
@@ -159,7 +164,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
         )
     plot_paired_polar_curve(
         neuron_dir_b / "yaw_indoor_outdoor.png",
-        theta_deg,
+        yaw_theta,
         curves_a["hd_curve"],
         curves_b["hd_curve"],
         "Yaw tuning (indoor vs outdoor)",
@@ -167,7 +172,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
     )
     plot_paired_polar_curve(
         neuron_dir_b / "roll_indoor_outdoor.png",
-        theta_deg,
+        roll_theta,
         curves_a["roll_curve"],
         curves_b["roll_curve"],
         "Roll tuning (indoor vs outdoor)",
@@ -175,7 +180,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
     )
     plot_paired_polar_curve(
         neuron_dir_b / "pitch_indoor_outdoor.png",
-        theta_deg,
+        pitch_theta,
         curves_a["pitch_curve"],
         curves_b["pitch_curve"],
         "Pitch tuning (indoor vs outdoor)",
@@ -193,6 +198,7 @@ def _plot_paired_polar(neuron_dir_a: Path, neuron_dir_b: Path) -> None:
 def process_session(
     session: str,
     dayid2cellinfo: dict[str, Path],
+    angle_ranges: AngleBinningRanges,
     n_shuffle: int = SHUFFLE_N,
     *,
     recompute_scores: bool = True,
@@ -208,11 +214,14 @@ def process_session(
         pitch=data["pitch"],
         spikes=data["spikes"],
     )
-    bins = build_bins(inputs)
+    bins = build_bins(inputs, angle_ranges)
 
     session_dir = OUT_ROOT / session
     session_dir.mkdir(parents=True, exist_ok=True)
-    binning_note(session_dir / "binning_notes.txt")
+    binning_note(
+        session_dir / "binning_notes.txt",
+        angle_ranges=angle_ranges,
+    )
 
     n_neurons = inputs.spikes.shape[1]
     pyr_idx = pyramidal_indices_for_session(session, dayid2cellinfo, n_neurons)
@@ -322,6 +331,21 @@ def main():
         print("[FATAL] No sessions with required inputs found.")
         return
 
+    roll_all, pitch_all = load_roll_pitch_angles(sessions)
+    lower_pct, upper_pct = ROLL_PITCH_TRIM_PERCENTILES
+    if roll_all.size == 0 or pitch_all.size == 0:
+        roll_start, roll_width = 0.0, 2.0 * np.pi
+        pitch_start, pitch_width = 0.0, 2.0 * np.pi
+    else:
+        roll_start, roll_width = circular_trim_range(roll_all, lower_pct, upper_pct)
+        pitch_start, pitch_width = circular_trim_range(pitch_all, lower_pct, upper_pct)
+    angle_ranges = AngleBinningRanges(
+        roll_start=roll_start,
+        roll_width=roll_width,
+        pitch_start=pitch_start,
+        pitch_width=pitch_width,
+    )
+
     dayid2cellinfo = build_dayid_to_cellinfo()
     _write_lines(OUT_ROOT / "sessions_all_present.txt", sessions)
     print(f"[INFO] Found {len(sessions)} sessions with all required inputs present.")
@@ -346,7 +370,7 @@ def main():
     rescored = []
     for session in pending:
         try:
-            out_csv = process_session(session, dayid2cellinfo, write_plots=True)
+            out_csv = process_session(session, dayid2cellinfo, angle_ranges, write_plots=True)
         except Exception as exc:  # pragma: no cover - runtime logging
             print(f"[SKIP] {session}: {exc}")
             continue
@@ -362,6 +386,7 @@ def main():
             out_csv = process_session(
                 session,
                 dayid2cellinfo,
+                angle_ranges,
                 recompute_scores=recompute_scores,
                 write_plots=write_plots,
             )

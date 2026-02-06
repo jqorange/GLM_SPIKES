@@ -4,16 +4,22 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from .angle_utils import circular_trim_range, shift_angles
 from .config import (
     AGG_FACTOR,
-    ANGLE_N_BINS,
     DLC_ROOT,
     IMU_ROOT,
+    PITCH_N_BINS,
     POSITION_ROOT,
+    ROLL_N_BINS,
+    ROLL_PITCH_TRIM_PERCENTILES,
     SPEED_N_BINS,
     SPIKE_ROOT,
+    YAW_N_BINS,
 )
 from .design_matrix import bin_col, build_position_index
+
+_ROLL_PITCH_RANGE: tuple[float, float, float, float] | None = None
 
 
 def list_sessions_imu(root):
@@ -28,6 +34,36 @@ def list_sessions_imu(root):
         if f.exists():
             out.add(stem)
     return out
+
+
+def _load_global_roll_pitch_ranges() -> tuple[float, float, float, float]:
+    global _ROLL_PITCH_RANGE
+    if _ROLL_PITCH_RANGE is not None:
+        return _ROLL_PITCH_RANGE
+
+    sessions = sorted(list_sessions_imu(IMU_ROOT))
+    roll_all = []
+    pitch_all = []
+    for session in sessions:
+        imu_path = IMU_ROOT / session / f"{session}_IMU_features.csv"
+        if not imu_path.exists():
+            continue
+        imu_df = pd.read_csv(imu_path, usecols=["roll", "pitch"]).astype(np.float32)
+        roll_all.append(np.mod(imu_df["roll"].to_numpy(dtype=np.float32), 2.0 * np.pi))
+        pitch_all.append(np.mod(imu_df["pitch"].to_numpy(dtype=np.float32), 2.0 * np.pi))
+
+    if roll_all:
+        roll_vals = np.concatenate(roll_all)
+        pitch_vals = np.concatenate(pitch_all)
+        lower_pct, upper_pct = ROLL_PITCH_TRIM_PERCENTILES
+        roll_start, roll_width = circular_trim_range(roll_vals, lower_pct, upper_pct)
+        pitch_start, pitch_width = circular_trim_range(pitch_vals, lower_pct, upper_pct)
+    else:
+        roll_start, roll_width = 0.0, 2.0 * np.pi
+        pitch_start, pitch_width = 0.0, 2.0 * np.pi
+
+    _ROLL_PITCH_RANGE = (roll_start, roll_width, pitch_start, pitch_width)
+    return _ROLL_PITCH_RANGE
 
 
 def list_sessions_spike(root):
@@ -119,9 +155,13 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+
+    roll_start, roll_width, pitch_start, pitch_width = _load_global_roll_pitch_ranges()
+    roll_shift = shift_angles(imu_df["roll"].values, roll_start)
+    pitch_shift = shift_angles(imu_df["pitch"].values, pitch_start)
+    roll_bin = bin_col(roll_shift, n_bins=ROLL_N_BINS, vmin=0, vmax=roll_width)
+    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=YAW_N_BINS, vmin=0, vmax=2 * np.pi)
+    pitch_bin = bin_col(pitch_shift, n_bins=PITCH_N_BINS, vmin=0, vmax=pitch_width)
 
     return {
         "T": int(L),
