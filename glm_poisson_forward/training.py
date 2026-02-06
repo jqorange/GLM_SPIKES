@@ -104,7 +104,8 @@ def save_neuron_artifacts_for_model(
     ensure_feature_mapping(str(model_dir), feature_names)
 
     fold_llhi: List[float] = []
-    mu_oof = np.full_like(y_all, np.nan, dtype=np.float32)
+    mu_oof_sum = np.zeros_like(y_all, dtype=np.float64)
+    mu_oof_count = np.zeros_like(y_all, dtype=np.int64)
 
     for k, (tr, va) in enumerate(folds, start=1):
         fold_dir = neuron_dir / f"fold{k}"
@@ -150,7 +151,12 @@ def save_neuron_artifacts_for_model(
             fold_dir / "llhi.csv", index=False
         )
 
-        mu_oof[va] = mu_va.astype(np.float32)
+        mu_oof_sum[va] += mu_va
+        mu_oof_count[va] += 1
+
+    mu_oof = np.full_like(y_all, np.nan, dtype=np.float32)
+    valid_mask = mu_oof_count > 0
+    mu_oof[valid_mask] = (mu_oof_sum[valid_mask] / mu_oof_count[valid_mask]).astype(np.float32)
 
     mu_base_oof = build_oof_constant_mu(y_all, folds)
     llhi_oof = compute_llhi_bps_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)

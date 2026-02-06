@@ -8,12 +8,12 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.model_selection import KFold
 from tqdm import tqdm
 
 from .config import (
     ALPHA,
     CV_FOLDS,
+    FS_HZ,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
@@ -21,6 +21,7 @@ from .config import (
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
+    SEED,
     VARS_ALL,
     WEIGHTS_BASE,
 )
@@ -59,6 +60,47 @@ def _build_design_cache(data_dict: Dict[str, np.ndarray]):
     return get_X_and_feats
 
 
+def _chunk_indices(T: int, chunk_samples: int) -> List[np.ndarray]:
+    n_chunks = int(np.ceil(T / chunk_samples))
+    chunks = []
+    for i in range(n_chunks):
+        start = i * chunk_samples
+        end = min((i + 1) * chunk_samples, T)
+        chunks.append(np.arange(start, end, dtype=np.int64))
+    return chunks
+
+
+def _build_chunked_cv_folds(
+    T: int,
+    chunk_sec: float = 10.0,
+    fs_hz: float = FS_HZ,
+    n_folds: int = CV_FOLDS,
+    seed: int = SEED,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    chunk_samples = max(int(round(chunk_sec * fs_hz)), 1)
+    chunks = _chunk_indices(T, chunk_samples)
+    rng = np.random.default_rng(seed)
+    shuffled_chunks = [chunks[i] for i in rng.permutation(len(chunks))]
+
+    split_chunks = list(np.array_split(shuffled_chunks, n_folds))
+    fold_indices: List[np.ndarray] = []
+    for fold_chunks in split_chunks:
+        if len(fold_chunks) == 0:
+            fold_indices.append(np.array([], dtype=np.int64))
+            continue
+        fold_indices.append(np.concatenate(list(fold_chunks)))
+
+    folds_idx: List[Tuple[np.ndarray, np.ndarray]] = []
+    for i in range(n_folds):
+        val_fold_ids = [(i + j) % n_folds for j in range(3)]
+        val_idx = np.concatenate([fold_indices[j] for j in val_fold_ids if fold_indices[j].size > 0])
+        train_idx = np.concatenate(
+            [fold_indices[j] for j in range(n_folds) if j not in val_fold_ids and fold_indices[j].size > 0]
+        )
+        folds_idx.append((np.sort(train_idx), np.sort(val_idx)))
+    return folds_idx
+
+
 @dataclass
 class StepRecord:
     step: int
@@ -82,16 +124,13 @@ def _llhi_cv_for_neuron(
     y = Y_all[:, neuron_idx].astype(np.float64)
 
     fold_llhi: List[float] = []
-    mu_oof = np.full_like(y, np.nan, dtype=np.float32)
 
     for (tr, va) in folds_idx:
         mu_va, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
         fold_llhi.append(float(llhi))
-        mu_oof[va] = mu_va
 
-    mu_base_oof = build_oof_constant_mu(y, folds_idx)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y, mu_oof, mu_base_oof)
-    return float(llhi_oof), fold_llhi
+    mean_llhi = float(np.nanmean(fold_llhi)) if fold_llhi else float("nan")
+    return mean_llhi, fold_llhi
 
 
 def _save_accepted_step(
@@ -306,8 +345,7 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
-    kf = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx = list(kf.split(np.arange(T)))
+    folds_idx = _build_chunked_cv_folds(T)
 
     get_X_and_feats = _build_design_cache(data_dict)
 

@@ -65,10 +65,15 @@ def dll_bits_series_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> np.ndarra
 
 def build_oof_constant_mu(y_cnt: np.ndarray, folds_idx) -> np.ndarray:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
-    mu_oof = np.full_like(y, fill_value=1e-12, dtype=np.float64)
+    mu_oof_sum = np.zeros_like(y, dtype=np.float64)
+    mu_oof_count = np.zeros_like(y, dtype=np.int64)
     for tr, va in folds_idx:
         mean_tr = float(np.mean(y[tr]))
-        mu_oof[va] = max(mean_tr, 1e-12)
+        mu_oof_sum[va] += max(mean_tr, 1e-12)
+        mu_oof_count[va] += 1
+    mu_oof = np.full_like(y, fill_value=1e-12, dtype=np.float64)
+    valid_mask = mu_oof_count > 0
+    mu_oof[valid_mask] = mu_oof_sum[valid_mask] / mu_oof_count[valid_mask]
     return mu_oof
 
 
