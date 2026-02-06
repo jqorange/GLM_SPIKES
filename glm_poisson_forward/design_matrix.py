@@ -5,7 +5,7 @@ import pandas as pd
 from scipy import sparse
 from sklearn.preprocessing import OneHotEncoder
 
-from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDAS, SMOOTH_VARS
+from .config import ANGLE_BIN_SETTINGS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDAS, SMOOTH_VARS
 
 
 def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
@@ -18,6 +18,80 @@ def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
     out = np.digitize(vals, edges) - 1
     out = np.clip(out, 0, n_bins - 1)
     return out.astype(np.int32)
+
+
+def _distribute_bins(ranges, n_bins: int, bins_per_range: Optional[List[int]] = None) -> List[int]:
+    if bins_per_range is not None:
+        if sum(bins_per_range) != n_bins:
+            raise ValueError("bins_per_range must sum to n_bins.")
+        return list(bins_per_range)
+    lengths = np.asarray([float(end - start) for start, end in ranges], dtype=np.float64)
+    if np.any(lengths <= 0):
+        raise ValueError("All range lengths must be positive.")
+    total = float(lengths.sum())
+    raw = lengths / total * float(n_bins)
+    floors = np.floor(raw).astype(int)
+    bins = np.maximum(floors, 1)
+    remainders = raw - floors
+    diff = int(n_bins - bins.sum())
+    while diff > 0:
+        idx = int(np.argmax(remainders))
+        bins[idx] += 1
+        remainders[idx] = 0.0
+        diff -= 1
+    while diff < 0:
+        idx = int(np.argmin(remainders + (bins <= 1) * 10.0))
+        if bins[idx] <= 1:
+            break
+        bins[idx] -= 1
+        diff += 1
+    if bins.sum() != n_bins:
+        raise ValueError("Could not distribute bins across ranges.")
+    return bins.tolist()
+
+
+def _clamp_to_ranges(vals: np.ndarray, ranges) -> np.ndarray:
+    vals = np.asarray(vals, dtype=np.float32)
+    clamped = vals.copy()
+    in_any = np.zeros(vals.shape, dtype=bool)
+    boundaries = np.asarray([b for start, end in ranges for b in (start, end)], dtype=np.float32)
+    for start, end in ranges:
+        mask = (vals >= start) & (vals <= end)
+        in_any |= mask
+        clamped[mask] = vals[mask]
+    missing = ~in_any
+    if np.any(missing):
+        diffs = np.abs(vals[missing][:, None] - boundaries[None, :])
+        nearest = np.argmin(diffs, axis=1)
+        clamped[missing] = boundaries[nearest]
+    return clamped
+
+
+def bin_angle(vals, *, ranges, n_bins: int, bins_per_range: Optional[List[int]] = None) -> np.ndarray:
+    vals = np.asarray(vals, dtype=np.float32)
+    clamped = _clamp_to_ranges(vals, ranges)
+    range_bins = _distribute_bins(ranges, n_bins, bins_per_range=bins_per_range)
+    out = np.full(vals.shape, -1, dtype=np.int32)
+    offset = 0
+    for (start, end), n_sub in zip(ranges, range_bins):
+        edges = np.linspace(start, end, n_sub + 1, dtype=np.float32)
+        mask = (clamped >= start) & (clamped <= end) & (out < 0)
+        if np.any(mask):
+            bin_idx = np.searchsorted(edges, clamped[mask], side="right") - 1
+            bin_idx = np.clip(bin_idx, 0, n_sub - 1)
+            out[mask] = bin_idx + offset
+        offset += n_sub
+    out[out < 0] = 0
+    return out.astype(np.int32)
+
+
+def angle_bin_centers(*, ranges, n_bins: int, bins_per_range: Optional[List[int]] = None) -> np.ndarray:
+    range_bins = _distribute_bins(ranges, n_bins, bins_per_range=bins_per_range)
+    centers = []
+    for (start, end), n_sub in zip(ranges, range_bins):
+        edges = np.linspace(start, end, n_sub + 1, dtype=np.float64)
+        centers.append(0.5 * (edges[:-1] + edges[1:]))
+    return np.concatenate(centers)
 
 
 def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
@@ -56,7 +130,8 @@ def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarra
     for ang in ["roll", "yaw", "pitch"]:
         if ang in selected_vars:
             cols.append(data_dict[f"{ang}_bin"].astype(np.int32))
-            cats.append(np.arange(ANGLE_N_BINS, dtype=int))
+            n_bins = int(ANGLE_BIN_SETTINGS[ang]["n_bins"])
+            cats.append(np.arange(n_bins, dtype=int))
             order.append(ang)
 
     if len(cols) == 0:

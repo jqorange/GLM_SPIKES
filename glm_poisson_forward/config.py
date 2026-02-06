@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 # Input roots
@@ -49,7 +50,21 @@ VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 # Discretization bins
 POSITION_CELL_CM = 8.0
 SPEED_N_BINS = 15
-ANGLE_N_BINS = 36  # roll/yaw/pitch bins
+ANGLE_BIN_SETTINGS = {
+    "yaw": {
+        "ranges": [(0.0, 2.0 * math.pi)],
+        "n_bins": 12,
+    },
+    "roll": {
+        "ranges": [(0.0, 0.5 * math.pi), (1.5 * math.pi, 2.0 * math.pi)],
+        "n_bins": 6,
+    },
+    "pitch": {
+        "ranges": [(0.0, 0.5 * math.pi), (1.5 * math.pi, 2.0 * math.pi)],
+        "n_bins": 6,
+    },
+}
+ANGLE_N_BINS = ANGLE_BIN_SETTINGS["yaw"]["n_bins"]  # Deprecated: use ANGLE_BIN_SETTINGS per-angle bins.
 MIN_SPEED_CM_S = 0.0  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
 
 # Fitting-curve plots

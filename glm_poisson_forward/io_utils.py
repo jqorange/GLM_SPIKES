@@ -6,14 +6,14 @@ import pandas as pd
 
 from .config import (
     AGG_FACTOR,
-    ANGLE_N_BINS,
+    ANGLE_BIN_SETTINGS,
     DLC_ROOT,
     IMU_ROOT,
     POSITION_ROOT,
     SPEED_N_BINS,
     SPIKE_ROOT,
 )
-from .design_matrix import bin_col, build_position_index
+from .design_matrix import bin_angle, bin_col, build_position_index
 
 
 def list_sessions_imu(root):
@@ -119,9 +119,9 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    roll_bin = bin_angle(imu_df["roll"].values, **ANGLE_BIN_SETTINGS["roll"])
+    yaw_bin = bin_angle(imu_df["yaw"].values, **ANGLE_BIN_SETTINGS["yaw"])
+    pitch_bin = bin_angle(imu_df["pitch"].values, **ANGLE_BIN_SETTINGS["pitch"])
 
     return {
         "T": int(L),
