@@ -6,13 +6,15 @@ import pandas as pd
 
 from .config import (
     AGG_FACTOR,
-    ANGLE_N_BINS,
+    ANGLE_BINS_BY_VAR,
+    ANGLE_RANGES_BY_VAR,
     DLC_ROOT,
     IMU_ROOT,
     POSITION_ROOT,
     SPEED_N_BINS,
     SPIKE_ROOT,
 )
+from .angle_utils import bin_angle
 from .design_matrix import bin_col, build_position_index
 
 
@@ -111,17 +113,25 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     imu_df["yaw"] = yaw_rad
 
-    imu_df["yaw"] = np.mod(imu_df["yaw"].values, 2 * np.pi)
-    imu_df["pitch"] = np.mod(imu_df["pitch"].values, 2 * np.pi)
-    imu_df["roll"] = np.mod(imu_df["roll"].values, 2 * np.pi)
-
     pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    roll_bin = bin_angle(
+        imu_df["roll"].values,
+        ranges=ANGLE_RANGES_BY_VAR["roll"],
+        n_bins=ANGLE_BINS_BY_VAR["roll"],
+    )
+    yaw_bin = bin_angle(
+        imu_df["yaw"].values,
+        ranges=ANGLE_RANGES_BY_VAR["yaw"],
+        n_bins=ANGLE_BINS_BY_VAR["yaw"],
+    )
+    pitch_bin = bin_angle(
+        imu_df["pitch"].values,
+        ranges=ANGLE_RANGES_BY_VAR["pitch"],
+        n_bins=ANGLE_BINS_BY_VAR["pitch"],
+    )
 
     return {
         "T": int(L),

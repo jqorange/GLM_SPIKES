@@ -6,9 +6,10 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 
+from glm_poisson_forward.angle_utils import angle_bin_centers
 from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 
-from .config import ANGLE_N_BINS, SPEED_MAX_M_S, SPEED_MIN_M_S
+from .config import ANGLE_BINS_BY_VAR, ANGLE_RANGES_BY_VAR, SPEED_MAX_M_S, SPEED_MIN_M_S
 
 
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
@@ -84,7 +85,15 @@ def plot_neuron_summary(
     neuron_idx: int,
     aux: Dict[str, np.ndarray],
 ) -> None:
-    theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
+    yaw_theta_deg = np.rad2deg(
+        angle_bin_centers(ANGLE_RANGES_BY_VAR["yaw"], ANGLE_BINS_BY_VAR["yaw"])
+    )
+    roll_theta_deg = np.rad2deg(
+        angle_bin_centers(ANGLE_RANGES_BY_VAR["roll"], ANGLE_BINS_BY_VAR["roll"])
+    )
+    pitch_theta_deg = np.rad2deg(
+        angle_bin_centers(ANGLE_RANGES_BY_VAR["pitch"], ANGLE_BINS_BY_VAR["pitch"])
+    )
     title_bits = f"Neuron {neuron_idx}"
     _plot_single_speed(
         out_dir / "speed.png",
@@ -94,21 +103,21 @@ def plot_neuron_summary(
 
     plot_polar_curve(
         out_dir / "yaw.png",
-        theta_deg,
+        yaw_theta_deg,
         aux["hd_curve"],
         f"Neuron {neuron_idx} | yaw tuning",
         color="#1f77b4",
     )
     plot_polar_curve(
         out_dir / "roll.png",
-        theta_deg,
+        roll_theta_deg,
         aux["roll_curve"],
         f"Neuron {neuron_idx} | roll tuning",
         color="#ff7f0e",
     )
     plot_polar_curve(
         out_dir / "pitch.png",
-        theta_deg,
+        pitch_theta_deg,
         aux["pitch_curve"],
         f"Neuron {neuron_idx} | pitch tuning",
         color="#2ca02c",
@@ -165,9 +174,14 @@ def plot_paired_polar_curve(
 def binning_note(out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
+        yaw_bins = ANGLE_BINS_BY_VAR["yaw"]
+        roll_bins = ANGLE_BINS_BY_VAR["roll"]
+        pitch_bins = ANGLE_BINS_BY_VAR["pitch"]
         f.write(
             "Traditional tuning curves use these binning rules:\n"
             f"- Position bins: {POSITION_CELL_CM:.1f} cm square\n"
             f"- Speed bins: {SPEED_N_BINS} bins on [0, 1.5] m/s\n"
-            f"- Angle bins (roll/yaw/pitch): {ANGLE_N_BINS} bins on [0, 2π) rad\n"
+            f"- Yaw bins: {yaw_bins} bins on {ANGLE_RANGES_BY_VAR['yaw']} rad\n"
+            f"- Roll bins: {roll_bins} bins on {ANGLE_RANGES_BY_VAR['roll']} rad\n"
+            f"- Pitch bins: {pitch_bins} bins on {ANGLE_RANGES_BY_VAR['pitch']} rad\n"
         )

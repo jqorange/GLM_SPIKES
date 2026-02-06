@@ -6,10 +6,12 @@ from typing import Dict, Tuple
 import numpy as np
 from scipy import ndimage
 
+from glm_poisson_forward.angle_utils import angle_bin_centers, bin_angle
 from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 from glm_poisson_forward.design_matrix import bin_col
 from .config import (
-    ANGLE_N_BINS,
+    ANGLE_BINS_BY_VAR,
+    ANGLE_RANGES_BY_VAR,
     ANGULAR_K_MAX,
     BIN_SEC,
     BIN_SMOOTH_SIGMA_BINS,
@@ -65,9 +67,21 @@ def build_bins(inputs: TuningInputs) -> SessionBinning:
     y_size = int(np.max(y_bin) - y_min + 1)
 
     speed_bin = bin_col(inputs.head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
-    hd_bin = bin_col(inputs.heading_rad, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
-    roll_bin = bin_col(inputs.roll, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
-    pitch_bin = bin_col(inputs.pitch, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
+    hd_bin = bin_angle(
+        inputs.heading_rad,
+        ranges=ANGLE_RANGES_BY_VAR["yaw"],
+        n_bins=ANGLE_BINS_BY_VAR["yaw"],
+    )
+    roll_bin = bin_angle(
+        inputs.roll,
+        ranges=ANGLE_RANGES_BY_VAR["roll"],
+        n_bins=ANGLE_BINS_BY_VAR["roll"],
+    )
+    pitch_bin = bin_angle(
+        inputs.pitch,
+        ranges=ANGLE_RANGES_BY_VAR["pitch"],
+        n_bins=ANGLE_BINS_BY_VAR["pitch"],
+    )
 
     return SessionBinning(
         x_bin=x_bin,
@@ -92,33 +106,38 @@ def _vector_length_k(weights: np.ndarray, angles: np.ndarray, k: int) -> float:
     return float(np.abs(vect))
 
 
-def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> Tuple[float, np.ndarray]:
+def angular_score(
+    angle_bin: np.ndarray,
+    spikes: np.ndarray,
+    mask: np.ndarray,
+    *,
+    n_bins: int,
+    angles_rad: np.ndarray,
+) -> Tuple[float, np.ndarray]:
     spikes_sel = spikes[mask]
     bins_sel = angle_bin[mask]
 
-    occ = np.bincount(bins_sel, minlength=ANGLE_N_BINS).astype(np.float64)
-    spk = np.bincount(bins_sel, weights=spikes_sel, minlength=ANGLE_N_BINS).astype(np.float64)
+    occ = np.bincount(bins_sel, minlength=n_bins).astype(np.float64)
+    spk = np.bincount(bins_sel, weights=spikes_sel, minlength=n_bins).astype(np.float64)
 
     occ_sec = occ * BIN_SEC
-    rate = np.full(ANGLE_N_BINS, np.nan, dtype=np.float64)
+    rate = np.full(n_bins, np.nan, dtype=np.float64)
     valid = occ_sec >= MIN_BIN_OCCUPANCY_SEC
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[valid] = spk[valid] / occ_sec[valid]
 
     rate = np.nan_to_num(rate, nan=0.0)
-    bin_deg = 360.0 / ANGLE_N_BINS
     sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate_smooth = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="wrap")
     else:
         rate_smooth = rate
 
-    angles = np.linspace(0.0, 2 * np.pi, ANGLE_N_BINS, endpoint=False)
     weights = np.nan_to_num(rate_smooth, nan=0.0)
     if np.sum(weights) <= 0:
         return float("nan"), rate_smooth
     k_max = max(int(ANGULAR_K_MAX), 1)
-    k_scores = [_vector_length_k(weights, angles, k) for k in range(1, k_max + 1)]
+    k_scores = [_vector_length_k(weights, angles_rad, k) for k in range(1, k_max + 1)]
     return float(np.nanmax(k_scores)), rate_smooth
 
 
@@ -216,9 +235,27 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
     spikes = inputs.spikes[:, neuron_idx].astype(np.float64)
     mask = valid_speed_mask(inputs.head_v)
 
-    hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask)
-    roll_score, roll_curve = angular_score(bins.roll_bin, spikes, mask)
-    pitch_score, pitch_curve = angular_score(bins.pitch_bin, spikes, mask)
+    hd_score, hd_curve = angular_score(
+        bins.hd_bin,
+        spikes,
+        mask,
+        n_bins=ANGLE_BINS_BY_VAR["yaw"],
+        angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["yaw"], ANGLE_BINS_BY_VAR["yaw"]),
+    )
+    roll_score, roll_curve = angular_score(
+        bins.roll_bin,
+        spikes,
+        mask,
+        n_bins=ANGLE_BINS_BY_VAR["roll"],
+        angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["roll"], ANGLE_BINS_BY_VAR["roll"]),
+    )
+    pitch_score, pitch_curve = angular_score(
+        bins.pitch_bin,
+        spikes,
+        mask,
+        n_bins=ANGLE_BINS_BY_VAR["pitch"],
+        angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["pitch"], ANGLE_BINS_BY_VAR["pitch"]),
+    )
     s_score = speed_score(inputs.head_v, spikes, mask)
     s_stability = speed_stability(inputs.head_v, spikes, mask)
 
@@ -271,9 +308,33 @@ def compute_shuffle_scores(
 
     for _ in range(n_shuffle):
         sh_spikes = time_shift_spikes(base_spikes, rng)
-        scores["hd_score"].append(angular_score(bins.hd_bin, sh_spikes, mask)[0])
-        scores["roll_score"].append(angular_score(bins.roll_bin, sh_spikes, mask)[0])
-        scores["pitch_score"].append(angular_score(bins.pitch_bin, sh_spikes, mask)[0])
+        scores["hd_score"].append(
+            angular_score(
+                bins.hd_bin,
+                sh_spikes,
+                mask,
+                n_bins=ANGLE_BINS_BY_VAR["yaw"],
+                angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["yaw"], ANGLE_BINS_BY_VAR["yaw"]),
+            )[0]
+        )
+        scores["roll_score"].append(
+            angular_score(
+                bins.roll_bin,
+                sh_spikes,
+                mask,
+                n_bins=ANGLE_BINS_BY_VAR["roll"],
+                angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["roll"], ANGLE_BINS_BY_VAR["roll"]),
+            )[0]
+        )
+        scores["pitch_score"].append(
+            angular_score(
+                bins.pitch_bin,
+                sh_spikes,
+                mask,
+                n_bins=ANGLE_BINS_BY_VAR["pitch"],
+                angles_rad=angle_bin_centers(ANGLE_RANGES_BY_VAR["pitch"], ANGLE_BINS_BY_VAR["pitch"]),
+            )[0]
+        )
         scores["speed_score"].append(speed_score(inputs.head_v, sh_spikes, mask))
         scores["speed_stability"].append(speed_stability(inputs.head_v, sh_spikes, mask))
 

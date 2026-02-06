@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from glm_poisson_forward.config import BIN_MS
+from glm_poisson_forward.config import BIN_MS, ANGLE_BINS_BY_VAR, ANGLE_RANGES_BY_VAR
 
 OUT_ROOT = Path("tuning_curves_traditional")
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -39,9 +39,6 @@ REBUILD_PAIRED_POLAR_PLOTS = True
 EQUALIZE_POLAR_AREA = False
 RESCORE_MODE = "scores"
 
-# Angular binning (degrees per bin)
-ANGLE_BIN_DEG = 3.0
-ANGLE_N_BINS = int(round(360.0 / ANGLE_BIN_DEG))
 
 # Parallelism
 N_WORKERS = 28

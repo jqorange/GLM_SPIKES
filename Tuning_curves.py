@@ -51,7 +51,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from glm_poisson_forward.config import ANGLE_N_BINS, BIN_MS, SPEED_N_BINS
+from glm_poisson_forward.angle_utils import angle_bin_centers
+from glm_poisson_forward.config import ANGLE_BINS_BY_VAR, ANGLE_RANGES_BY_VAR, BIN_MS, SPEED_N_BINS
 
 # =========================
 # CONFIG (EDIT AS NEEDED)
@@ -84,9 +85,6 @@ OUT_DIR = WEIGHTS_ROOT / "plots_tuning_FULL_FIT_coef_only"
 BIN_SEC = BIN_MS / 1000.0
 
 SPEED_RANGE = (0.0, 1.5)
-ROLL_RANGE = (0.0, 2.0 * math.pi)
-YAW_RANGE = (0.0, 2.0 * math.pi)
-PITCH_RANGE = (0.0, 2.0 * math.pi)
 
 # Smoothing (in bins). Set None/0 to disable.
 SMOOTH_SIGMA_BINS: float | None = 1.5
@@ -169,14 +167,9 @@ def _x_axis_for_var(var: str, K: int) -> Tuple[np.ndarray, str]:
         edges = np.linspace(SPEED_RANGE[0], SPEED_RANGE[1], K + 1, dtype=np.float64)
         centers = 0.5 * (edges[:-1] + edges[1:])
         return centers, "Speed bin center (m/s)"
-    if var in {"roll", "yaw"}:
-        edges = np.linspace(ROLL_RANGE[0], ROLL_RANGE[1], K + 1, dtype=np.float64)
-        centers = 0.5 * (edges[:-1] + edges[1:])
+    if var in {"roll", "yaw", "pitch"}:
+        centers = angle_bin_centers(ANGLE_RANGES_BY_VAR[var], K)
         return np.rad2deg(centers), f"{var} bin center (deg)"
-    if var == "pitch":
-        edges = np.linspace(PITCH_RANGE[0], PITCH_RANGE[1], K + 1, dtype=np.float64)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        return np.rad2deg(centers), "pitch bin center (deg)"
     raise ValueError(f"Unsupported var for x-axis: {var}")
 
 
@@ -424,7 +417,7 @@ def _compute_curve_rate(var: str, intercept: float, effects: Dict[str, np.ndarra
         if var == "Speed":
             eff = np.zeros(SPEED_N_BINS, dtype=np.float64)
         elif var in {"roll", "yaw", "pitch"}:
-            eff = np.zeros(ANGLE_N_BINS, dtype=np.float64)
+            eff = np.zeros(ANGLE_BINS_BY_VAR[var], dtype=np.float64)
         else:
             eff = np.zeros(1, dtype=np.float64)
 
