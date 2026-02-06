@@ -5,7 +5,15 @@ import pandas as pd
 from scipy import sparse
 from sklearn.preprocessing import OneHotEncoder
 
-from .config import ANGLE_N_BINS, POSITION_CELL_CM, SPEED_N_BINS, SMOOTH_LAMBDAS, SMOOTH_VARS
+from .config import (
+    PITCH_N_BINS,
+    POSITION_CELL_CM,
+    ROLL_N_BINS,
+    SPEED_N_BINS,
+    SMOOTH_LAMBDAS,
+    SMOOTH_VARS,
+    YAW_N_BINS,
+)
 
 
 def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
@@ -53,10 +61,11 @@ def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarra
         cats.append(np.arange(SPEED_N_BINS, dtype=int))
         order.append("head_v")
 
+    angle_bins = {"roll": ROLL_N_BINS, "yaw": YAW_N_BINS, "pitch": PITCH_N_BINS}
     for ang in ["roll", "yaw", "pitch"]:
         if ang in selected_vars:
             cols.append(data_dict[f"{ang}_bin"].astype(np.int32))
-            cats.append(np.arange(ANGLE_N_BINS, dtype=int))
+            cats.append(np.arange(angle_bins[ang], dtype=int))
             order.append(ang)
 
     if len(cols) == 0:

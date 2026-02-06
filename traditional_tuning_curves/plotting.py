@@ -8,7 +8,7 @@ import numpy as np
 
 from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
 
-from .config import ANGLE_N_BINS, SPEED_MAX_M_S, SPEED_MIN_M_S
+from .config import PITCH_N_BINS, ROLL_N_BINS, SPEED_MAX_M_S, SPEED_MIN_M_S, YAW_N_BINS
 
 
 def _plot_speed(ax, speed_curve: np.ndarray) -> None:
@@ -84,7 +84,9 @@ def plot_neuron_summary(
     neuron_idx: int,
     aux: Dict[str, np.ndarray],
 ) -> None:
-    theta_deg = np.linspace(0.0, 360.0, ANGLE_N_BINS, endpoint=False)
+    theta_yaw = np.linspace(0.0, 360.0, YAW_N_BINS, endpoint=False)
+    theta_roll = np.linspace(0.0, 360.0, ROLL_N_BINS, endpoint=False)
+    theta_pitch = np.linspace(0.0, 360.0, PITCH_N_BINS, endpoint=False)
     title_bits = f"Neuron {neuron_idx}"
     _plot_single_speed(
         out_dir / "speed.png",
@@ -94,21 +96,21 @@ def plot_neuron_summary(
 
     plot_polar_curve(
         out_dir / "yaw.png",
-        theta_deg,
+        theta_yaw,
         aux["hd_curve"],
         f"Neuron {neuron_idx} | yaw tuning",
         color="#1f77b4",
     )
     plot_polar_curve(
         out_dir / "roll.png",
-        theta_deg,
+        theta_roll,
         aux["roll_curve"],
         f"Neuron {neuron_idx} | roll tuning",
         color="#ff7f0e",
     )
     plot_polar_curve(
         out_dir / "pitch.png",
-        theta_deg,
+        theta_pitch,
         aux["pitch_curve"],
         f"Neuron {neuron_idx} | pitch tuning",
         color="#2ca02c",
@@ -169,5 +171,7 @@ def binning_note(out_path: Path) -> None:
             "Traditional tuning curves use these binning rules:\n"
             f"- Position bins: {POSITION_CELL_CM:.1f} cm square\n"
             f"- Speed bins: {SPEED_N_BINS} bins on [0, 1.5] m/s\n"
-            f"- Angle bins (roll/yaw/pitch): {ANGLE_N_BINS} bins on [0, 2π) rad\n"
+            f"- Yaw bins: {YAW_N_BINS} bins on [0, 2π) rad\n"
+            f"- Roll bins: {ROLL_N_BINS} bins on [0, 2π) rad (1st-99th pct clipped)\n"
+            f"- Pitch bins: {PITCH_N_BINS} bins on [0, 2π) rad (1st-99th pct clipped)\n"
         )

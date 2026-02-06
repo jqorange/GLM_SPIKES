@@ -6,14 +6,20 @@ import pandas as pd
 
 from .config import (
     AGG_FACTOR,
-    ANGLE_N_BINS,
     DLC_ROOT,
     IMU_ROOT,
+    PITCH_N_BINS,
     POSITION_ROOT,
+    ROLL_N_BINS,
+    ROLL_PITCH_CLIP_PCTS,
     SPEED_N_BINS,
     SPIKE_ROOT,
+    YAW_N_BINS,
 )
 from .design_matrix import bin_col, build_position_index
+
+
+_GLOBAL_ROLL_PITCH_BOUNDS = None
 
 
 def list_sessions_imu(root):
@@ -56,6 +62,14 @@ def list_sessions_position(root):
     return {s.stem.replace("positions_", "") for s in root.glob("positions_*.csv")}
 
 
+def list_sessions_all():
+    set_spk = list_sessions_spike(SPIKE_ROOT)
+    set_dlc = list_sessions_dlc_final(DLC_ROOT)
+    set_pos = list_sessions_position(POSITION_ROOT)
+    set_imu = list_sessions_imu(IMU_ROOT)
+    return sorted(list(set_spk & set_dlc & set_pos & set_imu))
+
+
 def session_paths(session: str) -> Dict[str, object]:
     return {
         "imu": IMU_ROOT / session / f"{session}_IMU_features.csv",
@@ -96,6 +110,56 @@ def load_spikes_50hz_counts(h5_path) -> np.ndarray:
     return Y50.astype(np.int32)
 
 
+def _circular_mean(angles: np.ndarray) -> float:
+    if angles.size == 0:
+        return 0.0
+    return float(np.angle(np.mean(np.exp(1j * angles))))
+
+
+def shift_angles(angles: np.ndarray, shift: float) -> np.ndarray:
+    return np.mod(angles - shift, 2 * np.pi)
+
+
+def _compute_shifted_bounds(angles: np.ndarray, pct_low: float, pct_high: float) -> Dict[str, float]:
+    shift = np.mod(_circular_mean(angles), 2 * np.pi)
+    shifted = shift_angles(angles, shift)
+    vmin, vmax = np.percentile(shifted, [pct_low, pct_high])
+    if np.isclose(vmin, vmax):
+        vmax = float(vmin + 1e-3)
+    return {"shift": float(shift), "vmin": float(vmin), "vmax": float(vmax)}
+
+
+def get_global_roll_pitch_bounds() -> Dict[str, Dict[str, float]]:
+    global _GLOBAL_ROLL_PITCH_BOUNDS
+    if _GLOBAL_ROLL_PITCH_BOUNDS is not None:
+        return _GLOBAL_ROLL_PITCH_BOUNDS
+
+    sessions = list_sessions_all()
+    if not sessions:
+        default = {"shift": 0.0, "vmin": 0.0, "vmax": float(2 * np.pi)}
+        _GLOBAL_ROLL_PITCH_BOUNDS = {"roll": default, "pitch": default}
+        return _GLOBAL_ROLL_PITCH_BOUNDS
+
+    # Shift angles by circular mean so 0/2π is not a hard boundary for percentiles.
+    roll_vals = []
+    pitch_vals = []
+    for session in sessions:
+        paths = session_paths(session)
+        imu_df = pd.read_csv(paths["imu"], usecols=["roll", "pitch"]).astype(np.float32)
+        roll_vals.append(np.mod(imu_df["roll"].values, 2 * np.pi))
+        pitch_vals.append(np.mod(imu_df["pitch"].values, 2 * np.pi))
+
+    all_roll = np.concatenate(roll_vals) if roll_vals else np.empty((0,), dtype=np.float32)
+    all_pitch = np.concatenate(pitch_vals) if pitch_vals else np.empty((0,), dtype=np.float32)
+    pct_low, pct_high = ROLL_PITCH_CLIP_PCTS
+
+    _GLOBAL_ROLL_PITCH_BOUNDS = {
+        "roll": _compute_shifted_bounds(all_roll, pct_low, pct_high),
+        "pitch": _compute_shifted_bounds(all_pitch, pct_low, pct_high),
+    }
+    return _GLOBAL_ROLL_PITCH_BOUNDS
+
+
 def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.ndarray]:
     pos_df = pd.read_csv(paths["position"], usecols=["head_x", "head_y", "heading_deg"]).astype(np.float32)
     dlc_df = pd.read_csv(paths["dlc_final"], usecols=["head_v"]).astype(np.float32)
@@ -119,9 +183,22 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
     head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
-    roll_bin = bin_col(imu_df["roll"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(imu_df["pitch"].values, n_bins=ANGLE_N_BINS, vmin=0, vmax=2 * np.pi)
+    bounds = get_global_roll_pitch_bounds()
+    roll_shifted = shift_angles(imu_df["roll"].values, bounds["roll"]["shift"])
+    pitch_shifted = shift_angles(imu_df["pitch"].values, bounds["pitch"]["shift"])
+    roll_bin = bin_col(
+        roll_shifted,
+        n_bins=ROLL_N_BINS,
+        vmin=bounds["roll"]["vmin"],
+        vmax=bounds["roll"]["vmax"],
+    )
+    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=YAW_N_BINS, vmin=0, vmax=2 * np.pi)
+    pitch_bin = bin_col(
+        pitch_shifted,
+        n_bins=PITCH_N_BINS,
+        vmin=bounds["pitch"]["vmin"],
+        vmax=bounds["pitch"]["vmax"],
+    )
 
     return {
         "T": int(L),

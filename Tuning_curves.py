@@ -51,7 +51,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from glm_poisson_forward.config import ANGLE_N_BINS, BIN_MS, SPEED_N_BINS
+from glm_poisson_forward.config import BIN_MS, PITCH_N_BINS, ROLL_N_BINS, SPEED_N_BINS, YAW_N_BINS
 
 # =========================
 # CONFIG (EDIT AS NEEDED)
@@ -424,7 +424,13 @@ def _compute_curve_rate(var: str, intercept: float, effects: Dict[str, np.ndarra
         if var == "Speed":
             eff = np.zeros(SPEED_N_BINS, dtype=np.float64)
         elif var in {"roll", "yaw", "pitch"}:
-            eff = np.zeros(ANGLE_N_BINS, dtype=np.float64)
+            if var == "roll":
+                bins = ROLL_N_BINS
+            elif var == "yaw":
+                bins = YAW_N_BINS
+            else:
+                bins = PITCH_N_BINS
+            eff = np.zeros(bins, dtype=np.float64)
         else:
             eff = np.zeros(1, dtype=np.float64)
 

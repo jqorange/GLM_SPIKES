@@ -49,7 +49,10 @@ VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 # Discretization bins
 POSITION_CELL_CM = 8.0
 SPEED_N_BINS = 15
-ANGLE_N_BINS = 36  # roll/yaw/pitch bins
+ROLL_N_BINS = 36
+YAW_N_BINS = 36
+PITCH_N_BINS = 36
+ROLL_PITCH_CLIP_PCTS = (1.0, 99.0)
 MIN_SPEED_CM_S = 0.0  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
 
 # Fitting-curve plots
