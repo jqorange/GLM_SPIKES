@@ -82,13 +82,13 @@ def _build_chunked_cv_folds(
     rng = np.random.default_rng(seed)
     shuffled_chunks = [chunks[i] for i in rng.permutation(len(chunks))]
 
-    split_chunks = list(np.array_split(shuffled_chunks, n_folds))
+    split_chunk_ids = list(np.array_split(np.arange(len(shuffled_chunks)), n_folds))
     fold_indices: List[np.ndarray] = []
-    for fold_chunks in split_chunks:
-        if len(fold_chunks) == 0:
+    for fold_chunk_ids in split_chunk_ids:
+        if len(fold_chunk_ids) == 0:
             fold_indices.append(np.array([], dtype=np.int64))
             continue
-        fold_indices.append(np.concatenate(list(fold_chunks)))
+        fold_indices.append(np.concatenate([shuffled_chunks[i] for i in fold_chunk_ids]))
 
     folds_idx: List[Tuple[np.ndarray, np.ndarray]] = []
     for i in range(n_folds):
@@ -99,7 +99,6 @@ def _build_chunked_cv_folds(
         )
         folds_idx.append((np.sort(train_idx), np.sort(val_idx)))
     return folds_idx
-
 
 @dataclass
 class StepRecord:
