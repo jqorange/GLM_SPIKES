@@ -17,6 +17,7 @@ FULL_FIT_DIRNAME = "FULL_FIT"
 N_JOBS = 29
 SEED = 0
 CV_FOLDS = 10
+CV_VAL_FOLDS = 3
 
 # Bin definitions
 BIN_MS = 20

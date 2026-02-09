@@ -8,12 +8,13 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.model_selection import KFold, ShuffleSplit
+from sklearn.model_selection import KFold
 from tqdm import tqdm
 
 from .config import (
     ALPHA,
     CV_FOLDS,
+    CV_VAL_FOLDS,
     MAX_MISMATCH_FRAMES_50HZ,
     MIN_SPEED_CM_S,
     N_JOBS,
@@ -330,10 +331,27 @@ def run_one_session(
         data_dict = apply_residual_speed(data_dict)
 
     T = int(data_dict["T"])
-    splitter = ShuffleSplit(n_splits=CV_FOLDS, test_size=0.3, random_state=SEED)
-    folds_idx_train = list(splitter.split(np.arange(T)))
+    rng = np.random.default_rng(SEED)
+    permuted_idx = rng.permutation(T)
     kf_full = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx_full = list(kf_full.split(np.arange(T)))
+    folds_idx_full = [
+        (permuted_idx[tr], permuted_idx[va]) for tr, va in kf_full.split(permuted_idx)
+    ]
+    fold_val_indices = [va for _tr, va in folds_idx_full]
+    if CV_VAL_FOLDS < 1 or CV_VAL_FOLDS >= CV_FOLDS:
+        raise ValueError(f"CV_VAL_FOLDS must be in [1, {CV_FOLDS - 1}]")
+    folds_idx_train = []
+    for k in range(CV_FOLDS):
+        val_folds = [(k + i) % CV_FOLDS for i in range(CV_VAL_FOLDS)]
+        tr_parts, va_parts = [], []
+        for fold_idx, fold_va in enumerate(fold_val_indices):
+            if fold_idx in val_folds:
+                va_parts.append(fold_va)
+            else:
+                tr_parts.append(fold_va)
+        tr_idx = np.concatenate(tr_parts)
+        va_idx = np.concatenate(va_parts)
+        folds_idx_train.append((tr_idx, va_idx))
 
     get_X_and_feats = _build_design_cache(data_dict)
 
