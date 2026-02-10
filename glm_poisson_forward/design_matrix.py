@@ -28,7 +28,7 @@ def bin_col(vals, n_bins: int, vmin=None, vmax=None) -> np.ndarray:
     return out.astype(np.int32)
 
 
-def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
+def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int, np.ndarray]:
     cell = float(POSITION_CELL_CM)
     x_bin = (np.asarray(head_x_cm, dtype=np.float32) // cell).astype(int)
     y_bin = (np.asarray(head_y_cm, dtype=np.float32) // cell).astype(int)
@@ -45,7 +45,8 @@ def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
         .merge(uniq, on=["x_bin", "y_bin"], how="left")["pos_idx"]
         .to_numpy(dtype=np.int32)
     )
-    return pos_idx, int(uniq.shape[0])
+    pos_xy_by_idx = uniq[["x_bin", "y_bin"]].to_numpy(dtype=np.int32)
+    return pos_idx, int(uniq.shape[0]), pos_xy_by_idx
 
 
 def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarray]) -> Tuple[sparse.csr_matrix, List[str]]:
@@ -101,6 +102,7 @@ def build_smoothness_rows(
     smooth_lambda: Optional[float] = None,
     smooth_vars: Optional[List[str]] = None,
     smooth_lambdas: Optional[Dict[str, float]] = None,
+    position_xy_by_idx: Optional[np.ndarray] = None,
 ) -> sparse.csr_matrix:
     if smooth_lambdas is None:
         smooth_lambdas = SMOOTH_LAMBDAS
@@ -143,6 +145,49 @@ def build_smoothness_rows(
         ]
         if len(idx) < 2:
             continue
+
+        if var == "Position" and position_xy_by_idx is not None:
+            feat_to_pos_idx = {}
+            for feat_i in idx:
+                token = feature_prefixes[feat_i]
+                try:
+                    feat_to_pos_idx[feat_i] = int(token.split("_")[-1])
+                except ValueError:
+                    continue
+
+            if len(feat_to_pos_idx) < 2:
+                continue
+
+            pos_to_feat_idx = {p: f for f, p in feat_to_pos_idx.items()}
+            xy_to_pos_idx = {
+                (int(x), int(y)): p
+                for p, (x, y) in enumerate(np.asarray(position_xy_by_idx, dtype=np.int32))
+            }
+
+            edge_pairs = set()
+            for pos_i, feat_i in pos_to_feat_idx.items():
+                x_i, y_i = position_xy_by_idx[pos_i]
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nb_pos = xy_to_pos_idx.get((int(x_i) + dx, int(y_i) + dy))
+                        if nb_pos is None:
+                            continue
+                        feat_j = pos_to_feat_idx.get(nb_pos)
+                        if feat_j is None:
+                            continue
+                        a, b = sorted((feat_i, feat_j))
+                        if a != b:
+                            edge_pairs.add((a, b))
+
+            for a, b in sorted(edge_pairs):
+                rows.extend([row_idx, row_idx])
+                cols.extend([a, b])
+                data.extend([-sqrt_lambda, sqrt_lambda])
+                row_idx += 1
+            continue
+
         for j in range(len(idx) - 1):
             rows.extend([row_idx, row_idx])
             cols.extend([idx[j], idx[j + 1]])

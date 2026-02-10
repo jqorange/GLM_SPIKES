@@ -19,8 +19,9 @@ def _augment_with_smoothness(
     X: sparse.csr_matrix,
     y: np.ndarray,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> Tuple[sparse.csr_matrix, np.ndarray]:
-    smooth_rows = build_smoothness_rows(feature_names)
+    smooth_rows = build_smoothness_rows(feature_names, position_xy_by_idx=position_xy_by_idx)
     if smooth_rows.shape[0] == 0:
         return X, y
     y_smooth = np.zeros(smooth_rows.shape[0], dtype=y.dtype)
@@ -35,6 +36,7 @@ def fit_predict_one_fold_poisson(
     tr_idx: np.ndarray,
     va_idx: np.ndarray,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, float]:
     Xtr, Xva = X_all[tr_idx], X_all[va_idx]
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
@@ -47,7 +49,12 @@ def fit_predict_one_fold_poisson(
         llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
         return mu_va.astype(np.float32), float(llhi)
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
+    Xtr_aug, ytr_aug = _augment_with_smoothness(
+        Xtr,
+        ytr,
+        feature_names,
+        position_xy_by_idx=position_xy_by_idx,
+    )
     mdl = PoissonRegressor(
         alpha=POISSON_ALPHA,
         max_iter=MAX_ITER,
@@ -66,6 +73,7 @@ def _fit_one_fold_weights_poisson(
     y_all: np.ndarray,
     tr_idx: np.ndarray,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return w = [coef..., intercept] for one fold (fit on train only)."""
     Xtr = X_all[tr_idx]
@@ -77,7 +85,12 @@ def _fit_one_fold_weights_poisson(
         w[-1] = np.log(1e-12)
         return w
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
+    Xtr_aug, ytr_aug = _augment_with_smoothness(
+        Xtr,
+        ytr,
+        feature_names,
+        position_xy_by_idx=position_xy_by_idx,
+    )
     mdl = PoissonRegressor(
         alpha=POISSON_ALPHA,
         max_iter=MAX_ITER,
@@ -99,6 +112,7 @@ def save_neuron_artifacts_for_model(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> Dict:
     neuron_dir.mkdir(parents=True, exist_ok=True)
     ensure_feature_mapping(str(model_dir), feature_names)
@@ -120,7 +134,12 @@ def save_neuron_artifacts_for_model(
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
             w[-1] = np.log(1e-12)
         else:
-            Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
+            Xtr_aug, ytr_aug = _augment_with_smoothness(
+                Xtr,
+                ytr,
+                feature_names,
+                position_xy_by_idx=position_xy_by_idx,
+            )
             mdl = PoissonRegressor(
                 alpha=POISSON_ALPHA,
                 max_iter=MAX_ITER,
@@ -183,6 +202,7 @@ def save_full_fit_weights_for_all_neurons(
     model_vars: List[str],
     X_all: sparse.csr_matrix,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None,
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     n_jobs: int = N_JOBS,
@@ -206,7 +226,13 @@ def save_full_fit_weights_for_all_neurons(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = _fit_one_fold_weights_poisson(X_all, y, tr, feature_names)
+                w = _fit_one_fold_weights_poisson(
+                    X_all,
+                    y,
+                    tr,
+                    feature_names,
+                    position_xy_by_idx=position_xy_by_idx,
+                )
                 ws.append(w)
 
                 fold_dir = neuron_dir / f"fold{k}"

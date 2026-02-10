@@ -48,15 +48,16 @@ from .training import (
 
 
 def _build_design_cache(data_dict: Dict[str, np.ndarray]):
-    cache: Dict[str, Tuple[sparse.csr_matrix, List[str]]] = {}
+    cache: Dict[str, Tuple[sparse.csr_matrix, List[str], np.ndarray | None]] = {}
 
-    def get_X_and_feats(model_vars: List[str]) -> Tuple[sparse.csr_matrix, List[str]]:
+    def get_X_and_feats(model_vars: List[str]) -> Tuple[sparse.csr_matrix, List[str], np.ndarray | None]:
         mk = model_key_from_vars(model_vars)
         if mk in cache:
             return cache[mk]
         X, feats = build_design_matrix(model_vars, data_dict)
-        cache[mk] = (X, feats)
-        return X, feats
+        pos_xy = data_dict.get("position_xy_by_idx") if "Position" in model_vars else None
+        cache[mk] = (X, feats, pos_xy)
+        return X, feats, pos_xy
 
     return get_X_and_feats
 
@@ -80,13 +81,20 @@ def _llhi_cv_for_neuron(
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     get_X_and_feats,
 ) -> Tuple[float, List[float]]:
-    X_all_m, feat = get_X_and_feats(model_vars)
+    X_all_m, feat, pos_xy = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
     fold_llhi: List[float] = []
 
     for (tr, va) in folds_idx:
-        _mu_val, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
+        _mu_val, llhi = fit_predict_one_fold_poisson(
+            X_all_m,
+            y,
+            tr,
+            va,
+            feat,
+            position_xy_by_idx=pos_xy,
+        )
         fold_llhi.append(float(llhi))
 
     mean_llhi = float(np.nanmean(fold_llhi)) if fold_llhi else float("nan")
@@ -102,7 +110,7 @@ def _save_accepted_step(
     get_X_and_feats,
 ):
     model_dir = OUT_ROOT / model_key_from_vars(model_vars)
-    X_all_m, feat_names = get_X_and_feats(model_vars)
+    X_all_m, feat_names, pos_xy = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
     neuron_dir = model_dir / f"neuron_{neuron_idx+1}"
     return save_neuron_artifacts_for_model(
@@ -114,6 +122,7 @@ def _save_accepted_step(
         X_all=X_all_m,
         y_all=y,
         feature_names=feat_names,
+        position_xy_by_idx=pos_xy,
     )
 
 
@@ -355,12 +364,13 @@ def run_one_session(
 
     get_X_and_feats = _build_design_cache(data_dict)
 
-    X_full, feats_full = get_X_and_feats(VARS_ALL)
+    X_full, feats_full, pos_xy_full = get_X_and_feats(VARS_ALL)
     save_full_fit_weights_for_all_neurons(
         out_root=OUT_ROOT,
         model_vars=VARS_ALL,
         X_all=X_full,
         feature_names=feats_full,
+        position_xy_by_idx=pos_xy_full,
         Y_all=Y_all,
         folds_idx=folds_idx_full,
         n_jobs=N_JOBS,
