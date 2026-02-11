@@ -36,7 +36,7 @@ from .io_utils import (
 )
 from .metrics import (
     build_oof_constant_mu,
-    compute_llhi_bps_poisson_vs_baseline,
+    compute_deviance_explained_poisson_vs_baseline,
     wilcoxon_greater,
 )
 from .plotting_utils import load_oof_from_neuron_dir, plot_fitting_curve
@@ -65,15 +65,15 @@ def _build_design_cache(data_dict: Dict[str, np.ndarray]):
 class StepRecord:
     step: int
     model: List[str]
-    mean_llhi: float
-    fold_llhi: List[float]
+    mean_deviance_explained: float
+    fold_deviance_explained: List[float]
     p_value_vs_prev: float = None
     stat_vs_prev: float = None
     n_pairs: int = None
     accepted: bool = True
 
 
-def _llhi_cv_for_neuron(
+def _deviance_explained_cv_for_neuron(
     model_vars: List[str],
     neuron_idx: int,
     Y_all: np.ndarray,
@@ -83,14 +83,16 @@ def _llhi_cv_for_neuron(
     X_all_m, feat = get_X_and_feats(model_vars)
     y = Y_all[:, neuron_idx].astype(np.float64)
 
-    fold_llhi: List[float] = []
+    fold_deviance_explained: List[float] = []
 
     for (tr, va) in folds_idx:
-        _mu_val, llhi = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
-        fold_llhi.append(float(llhi))
+        _mu_val, dev_expl = fit_predict_one_fold_poisson(X_all_m, y, tr, va, feat)
+        fold_deviance_explained.append(float(dev_expl))
 
-    mean_llhi = float(np.nanmean(fold_llhi)) if fold_llhi else float("nan")
-    return mean_llhi, fold_llhi
+    mean_deviance_explained = (
+        float(np.nanmean(fold_deviance_explained)) if fold_deviance_explained else float("nan")
+    )
+    return mean_deviance_explained, fold_deviance_explained
 
 
 def _save_accepted_step(
@@ -130,27 +132,27 @@ def _forward_select_one_neuron(
 
     single_candidates = []
     for v in remaining:
-        oof_llhi, fold_llhi = _llhi_cv_for_neuron(
+        mean_dev_expl, fold_dev_expl = _deviance_explained_cv_for_neuron(
             [v],
             neuron_idx,
             Y_all,
             folds_idx_train,
             get_X_and_feats,
         )
-        single_candidates.append((v, oof_llhi, fold_llhi))
+        single_candidates.append((v, mean_dev_expl, fold_dev_expl))
 
     single_candidates.sort(key=lambda x: (x[1] if np.isfinite(x[1]) else -np.inf), reverse=True)
-    best_v, best_oof_llhi, best_fold = single_candidates[0]
+    best_v, best_mean_dev_expl, best_fold_dev_expl = single_candidates[0]
 
-    stat, p, n = wilcoxon_greater(best_fold, b=None)
+    stat, p, n = wilcoxon_greater(best_fold_dev_expl, b=None)
     accepted = (p < ALPHA)
 
     path_records.append(
         StepRecord(
             step=1,
             model=[best_v],
-            mean_llhi=best_oof_llhi,
-            fold_llhi=list(map(float, best_fold)),
+            mean_deviance_explained=best_mean_dev_expl,
+            fold_deviance_explained=list(map(float, best_fold_dev_expl)),
             p_value_vs_prev=p,
             stat_vs_prev=stat,
             n_pairs=n,
@@ -170,34 +172,34 @@ def _forward_select_one_neuron(
 
     selected = [best_v]
     remaining.remove(best_v)
-    fold_llhi_prev = list(best_fold)
+    fold_dev_expl_prev = list(best_fold_dev_expl)
 
     step = 2
     while remaining:
         cand_list = []
         for cand in remaining:
             trial_vars = selected + [cand]
-            oof_llhi, fold_llhi = _llhi_cv_for_neuron(
+            mean_dev_expl, fold_dev_expl = _deviance_explained_cv_for_neuron(
                 trial_vars,
                 neuron_idx,
                 Y_all,
                 folds_idx_train,
                 get_X_and_feats,
             )
-            cand_list.append((cand, trial_vars, oof_llhi, fold_llhi))
+            cand_list.append((cand, trial_vars, mean_dev_expl, fold_dev_expl))
 
         cand_list.sort(key=lambda x: (x[2] if np.isfinite(x[2]) else -np.inf), reverse=True)
-        best_cand, best_trial_vars, best_trial_oof_llhi, best_trial_fold = cand_list[0]
+        best_cand, best_trial_vars, best_trial_mean_dev_expl, best_trial_fold_dev_expl = cand_list[0]
 
-        stat, p, n = wilcoxon_greater(best_trial_fold, fold_llhi_prev)
+        stat, p, n = wilcoxon_greater(best_trial_fold_dev_expl, fold_dev_expl_prev)
         accepted = (p < ALPHA)
 
         path_records.append(
             StepRecord(
                 step=step,
                 model=best_trial_vars,
-                mean_llhi=best_trial_oof_llhi,
-                fold_llhi=list(map(float, best_trial_fold)),
+                mean_deviance_explained=best_trial_mean_dev_expl,
+                fold_deviance_explained=list(map(float, best_trial_fold_dev_expl)),
                 p_value_vs_prev=p,
                 stat_vs_prev=stat,
                 n_pairs=n,
@@ -218,7 +220,7 @@ def _forward_select_one_neuron(
         )
         selected = best_trial_vars
         remaining.remove(best_cand)
-        fold_llhi_prev = list(best_trial_fold)
+        fold_dev_expl_prev = list(best_trial_fold_dev_expl)
         step += 1
 
         if len(selected) == len(VARS_ALL):
@@ -228,14 +230,14 @@ def _forward_select_one_neuron(
     const_stat = None
     const_n = None
     if selected:
-        _llhi, fold_llhi = _llhi_cv_for_neuron(
+        _mean_dev_expl, fold_dev_expl = _deviance_explained_cv_for_neuron(
             selected,
             neuron_idx,
             Y_all,
             folds_idx_train,
             get_X_and_feats,
         )
-        const_stat, const_p, const_n = wilcoxon_greater(fold_llhi, b=None)
+        const_stat, const_p, const_n = wilcoxon_greater(fold_dev_expl, b=None)
         if const_p >= ALPHA:
             return {
                 "neuron": f"neuron_{neuron_idx+1}",
@@ -277,8 +279,8 @@ def _plot_selected_models(
             y_full = Y_all[:, neuron_idx].astype(np.float64)
             y_oof, mu_oof = load_oof_from_neuron_dir(neuron_dir)
             mu_base_oof = build_oof_constant_mu(y_full, folds_idx)
-            llhi = compute_llhi_bps_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
-            title = f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | ΔLL={llhi:.4f} bits/spk"
+            dev_expl = compute_deviance_explained_poisson_vs_baseline(y_oof, mu_oof, mu_base_oof)
+            title = f"{session} | {neuron_name} | PoissonGLM | vars={model_key.replace('_','+')} | DevExpl={dev_expl:.4f}"
             out_png = fig_dir / f"{neuron_name}__{model_key}.png"
             plot_fitting_curve(
                 out_png,
