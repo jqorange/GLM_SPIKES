@@ -1,18 +1,16 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from sklearn.preprocessing import OneHotEncoder
 
 from .config import (
-    PITCH_N_BINS,
+    PITCH_N_KNOTS,
     POSITION_CELL_CM,
-    ROLL_N_BINS,
-    SPEED_N_BINS,
-    SMOOTH_LAMBDAS,
-    SMOOTH_VARS,
-    YAW_N_BINS,
+    ROLL_N_KNOTS,
+    SPEED_N_KNOTS,
+    SPLINE_TENSION,
+    YAW_N_KNOTS,
 )
 
 
@@ -48,114 +46,148 @@ def build_position_index(head_x_cm, head_y_cm) -> Tuple[np.ndarray, int]:
     return pos_idx, int(uniq.shape[0])
 
 
+def _cardinal_spline_weights(alpha: np.ndarray, tension: float) -> np.ndarray:
+    # [a^3, a^2, a, 1] @ M(s)
+    s = float(tension)
+    a = alpha.astype(np.float32)
+    a2 = a * a
+    a3 = a2 * a
+
+    w_m1 = (-s * a3) + (2.0 * s * a2) + (-s * a)
+    w_0 = ((2.0 - s) * a3) + ((s - 3.0) * a2) + 1.0
+    w_p1 = ((s - 2.0) * a3) + ((3.0 - 2.0 * s) * a2) + (s * a)
+    w_p2 = (s * a3) + (-s * a2)
+    return np.stack([w_m1, w_0, w_p1, w_p2], axis=1)
+
+
+def _build_spline_basis(
+    vals: np.ndarray,
+    n_knots: int,
+    vmin: float,
+    vmax: float,
+    *,
+    tension: float,
+    circular: bool,
+) -> sparse.csr_matrix:
+    vals = np.asarray(vals, dtype=np.float32)
+    T = int(vals.shape[0])
+    if T == 0:
+        return sparse.csr_matrix((0, n_knots), dtype=np.float32)
+    if n_knots < 4:
+        raise ValueError("n_knots must be >= 4 for cardinal spline basis.")
+
+    if circular:
+        period = float(vmax - vmin)
+        if period <= 0:
+            raise ValueError("For circular spline, vmax must be > vmin.")
+        step = period / float(n_knots)
+        rel = np.mod(vals - vmin, period)
+        seg = np.floor(rel / step).astype(np.int32)
+        alpha = (rel / step) - seg.astype(np.float32)
+        knot_idx = np.stack([seg - 1, seg, seg + 1, seg + 2], axis=1) % n_knots
+    else:
+        width = float(vmax - vmin)
+        if width <= 0:
+            return sparse.csr_matrix((T, n_knots), dtype=np.float32)
+        vals_clip = np.clip(vals, vmin, vmax)
+        step = width / float(n_knots - 1)
+        rel = (vals_clip - vmin) / step
+        seg = np.floor(rel).astype(np.int32)
+        seg = np.clip(seg, 0, n_knots - 2)
+        alpha = rel - seg.astype(np.float32)
+        alpha = np.clip(alpha, 0.0, 1.0)
+        knot_idx = np.stack([seg - 1, seg, seg + 1, seg + 2], axis=1)
+        knot_idx = np.clip(knot_idx, 0, n_knots - 1)
+
+    weights = _cardinal_spline_weights(alpha, tension=tension)
+
+    row = np.repeat(np.arange(T, dtype=np.int32), 4)
+    col = knot_idx.reshape(-1)
+    data = weights.reshape(-1).astype(np.float32)
+
+    X = sparse.coo_matrix((data, (row, col)), shape=(T, n_knots), dtype=np.float32)
+    return X.tocsr()
+
+
+def _build_position_onehot(position: np.ndarray, n_pos: int) -> Tuple[sparse.csr_matrix, List[str]]:
+    # Keep drop-first coding for Position to stay compatible with previous setup.
+    pos = np.asarray(position, dtype=np.int32)
+    T = int(pos.shape[0])
+    if n_pos <= 1:
+        return sparse.csr_matrix((T, 0), dtype=np.float32), []
+    mask = pos > 0
+    row = np.where(mask)[0].astype(np.int32)
+    col = (pos[mask] - 1).astype(np.int32)
+    data = np.ones(row.shape[0], dtype=np.float32)
+    X = sparse.coo_matrix((data, (row, col)), shape=(T, n_pos - 1), dtype=np.float32).tocsr()
+    names = [f"position_{i}" for i in range(1, n_pos)]
+    return X, names
+
+
 def build_design_matrix(selected_vars: List[str], data_dict: Dict[str, np.ndarray]) -> Tuple[sparse.csr_matrix, List[str]]:
-    cols, cats, order = [], [], []
+    T = int(data_dict["T"])
+    blocks: List[sparse.csr_matrix] = []
+    feature_names: List[str] = []
 
     if "Position" in selected_vars:
-        cols.append(data_dict["position"].astype(np.int32))
-        cats.append(np.arange(data_dict["n_pos"], dtype=int))
-        order.append("position")
+        X_pos, f_pos = _build_position_onehot(data_dict["position"], int(data_dict["n_pos"]))
+        blocks.append(X_pos)
+        feature_names.extend(f_pos)
 
     if "Speed" in selected_vars:
-        cols.append(data_dict["head_v_bin"].astype(np.int32))
-        cats.append(np.arange(SPEED_N_BINS, dtype=int))
-        order.append("head_v")
+        X = _build_spline_basis(
+            data_dict["head_v"],
+            n_knots=SPEED_N_KNOTS,
+            vmin=0.0,
+            vmax=1.5,
+            tension=SPLINE_TENSION,
+            circular=False,
+        )
+        blocks.append(X)
+        feature_names.extend([f"head_v_knot_{i}" for i in range(SPEED_N_KNOTS)])
 
-    angle_bins = {"roll": ROLL_N_BINS, "yaw": YAW_N_BINS, "pitch": PITCH_N_BINS}
-    for ang in ["roll", "yaw", "pitch"]:
-        if ang in selected_vars:
-            cols.append(data_dict[f"{ang}_bin"].astype(np.int32))
-            cats.append(np.arange(angle_bins[ang], dtype=int))
-            order.append(ang)
+    if "roll" in selected_vars:
+        X = _build_spline_basis(
+            data_dict["roll"],
+            n_knots=ROLL_N_KNOTS,
+            vmin=0.0,
+            vmax=float(data_dict["roll_width"]),
+            tension=SPLINE_TENSION,
+            circular=False,
+        )
+        blocks.append(X)
+        feature_names.extend([f"roll_knot_{i}" for i in range(ROLL_N_KNOTS)])
 
-    if len(cols) == 0:
-        X_zero = sparse.csr_matrix((len(data_dict["position"]), 0), dtype=np.float32)
+    if "yaw" in selected_vars:
+        X = _build_spline_basis(
+            data_dict["yaw"],
+            n_knots=YAW_N_KNOTS,
+            vmin=0.0,
+            vmax=2.0 * np.pi,
+            tension=SPLINE_TENSION,
+            circular=True,
+        )
+        blocks.append(X)
+        feature_names.extend([f"yaw_knot_{i}" for i in range(YAW_N_KNOTS)])
+
+    if "pitch" in selected_vars:
+        X = _build_spline_basis(
+            data_dict["pitch"],
+            n_knots=PITCH_N_KNOTS,
+            vmin=0.0,
+            vmax=float(data_dict["pitch_width"]),
+            tension=SPLINE_TENSION,
+            circular=False,
+        )
+        blocks.append(X)
+        feature_names.extend([f"pitch_knot_{i}" for i in range(PITCH_N_KNOTS)])
+
+    if not blocks:
+        X_zero = sparse.csr_matrix((T, 0), dtype=np.float32)
         return X_zero, ["intercept"]
 
-    cat_df = pd.DataFrame({name: col for name, col in zip(order, cols)})
-
-    try:
-        encoder = OneHotEncoder(
-            categories=cats,
-            sparse_output=True,
-            handle_unknown="ignore",
-            drop="first",
-        )
-    except TypeError:
-        encoder = OneHotEncoder(
-            categories=cats,
-            sparse=True,
-            handle_unknown="ignore",
-            drop="first",
-        )
-
-    X_cat = encoder.fit_transform(cat_df).astype(np.float32).tocsr()
-    feat_cat = encoder.get_feature_names_out(order).tolist()
-    feature_names = feat_cat + ["intercept"]
-    return X_cat, feature_names
-
-
-def build_smoothness_rows(
-    feature_names: List[str],
-    *,
-    smooth_lambda: Optional[float] = None,
-    smooth_vars: Optional[List[str]] = None,
-    smooth_lambdas: Optional[Dict[str, float]] = None,
-) -> sparse.csr_matrix:
-    if smooth_lambdas is None:
-        smooth_lambdas = SMOOTH_LAMBDAS
-    if smooth_vars is None:
-        smooth_vars = SMOOTH_VARS
-    n_features = len(feature_names)
-    if feature_names and feature_names[-1] == "intercept":
-        n_features -= 1
-    if smooth_lambda is not None and smooth_lambda <= 0 and not smooth_lambdas:
-        return sparse.csr_matrix((0, n_features), dtype=np.float32)
-    if not smooth_vars or n_features <= 0:
-        return sparse.csr_matrix((0, n_features), dtype=np.float32)
-
-    var_to_prefix = {
-        "Position": "position",
-        "Speed": "head_v",
-        "roll": "roll",
-        "yaw": "yaw",
-        "pitch": "pitch",
-    }
-
-    rows = []
-    cols = []
-    data = []
-    row_idx = 0
-    feature_prefixes = feature_names[:n_features]
-
-    for var in smooth_vars:
-        lambda_val = smooth_lambda
-        if smooth_lambdas is not None:
-            lambda_val = smooth_lambdas.get(var, lambda_val)
-        if lambda_val is None or lambda_val <= 0:
-            continue
-        sqrt_lambda = float(np.sqrt(lambda_val))
-        prefix = var_to_prefix.get(var, var)
-        idx = [
-            i
-            for i, name in enumerate(feature_prefixes)
-            if name.startswith(f"{prefix}_")
-        ]
-        if len(idx) < 2:
-            continue
-        for j in range(len(idx) - 1):
-            rows.extend([row_idx, row_idx])
-            cols.extend([idx[j], idx[j + 1]])
-            data.extend([-sqrt_lambda, sqrt_lambda])
-            row_idx += 1
-
-    if row_idx == 0:
-        return sparse.csr_matrix((0, n_features), dtype=np.float32)
-    smooth_rows = sparse.coo_matrix(
-        (np.asarray(data, dtype=np.float32), (np.asarray(rows), np.asarray(cols))),
-        shape=(row_idx, n_features),
-    ).tocsr()
-    return smooth_rows
+    X_all = sparse.hstack(blocks, format="csr", dtype=np.float32)
+    return X_all, feature_names + ["intercept"]
 
 
 def ensure_feature_mapping(model_dir: str, feature_names: List[str]):

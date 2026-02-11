@@ -33,26 +33,16 @@ ALPHA = 0.05
 MAX_ITER = 500
 POISSON_ALPHA = 1e-6  # IMPORTANT: small alpha to avoid over-shrinking for one-hot high-dim X
 
-# Smoothness regularization (pseudo-observation trick)
-# Set per-variable lambdas (>0) to enable smoothing per feature group.
-SMOOTH_LAMBDAS = {
-    "Position": 0.0,
-    "Speed": 0.0,
-    "roll": 0.0,
-    "yaw": 0.0,
-    "pitch": 0.0,
-}
-SMOOTH_VARS = list(SMOOTH_LAMBDAS.keys())
-
 # Candidate variable set
 VARS_ALL = ["Position", "Speed", "roll", "yaw", "pitch"]
 
-# Discretization bins
+# Cardinal-spline knot settings (each sample activates 4 neighboring knots)
 POSITION_CELL_CM = 8.0
-SPEED_N_BINS = 15
-ROLL_N_BINS = 36
-YAW_N_BINS = 36
-PITCH_N_BINS = 36
+SPEED_N_KNOTS = 15
+ROLL_N_KNOTS = 36
+YAW_N_KNOTS = 36
+PITCH_N_KNOTS = 36
+SPLINE_TENSION = 0.5
 ROLL_PITCH_TRIM_PERCENTILES = (1.0, 99.0)
 MIN_SPEED_CM_S = 0.0  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
 

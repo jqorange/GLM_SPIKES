@@ -11,22 +11,8 @@ from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
 from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
-from .design_matrix import build_smoothness_rows, ensure_feature_mapping, model_key_from_vars
+from .design_matrix import ensure_feature_mapping, model_key_from_vars
 from .metrics import compute_llhi_bps_poisson_vs_baseline, build_oof_constant_mu
-
-
-def _augment_with_smoothness(
-    X: sparse.csr_matrix,
-    y: np.ndarray,
-    feature_names: List[str],
-) -> Tuple[sparse.csr_matrix, np.ndarray]:
-    smooth_rows = build_smoothness_rows(feature_names)
-    if smooth_rows.shape[0] == 0:
-        return X, y
-    y_smooth = np.zeros(smooth_rows.shape[0], dtype=y.dtype)
-    X_aug = sparse.vstack([X, smooth_rows], format="csr")
-    y_aug = np.concatenate([y, y_smooth])
-    return X_aug, y_aug
 
 
 def fit_predict_one_fold_poisson(
@@ -47,13 +33,12 @@ def fit_predict_one_fold_poisson(
         llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
         return mu_va.astype(np.float32), float(llhi)
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
     mdl = PoissonRegressor(
         alpha=POISSON_ALPHA,
         max_iter=MAX_ITER,
-        fit_intercept=True,  # intercept is not part of X/feature_names; smoothing rows exclude it
+        fit_intercept=True,
     )
-    mdl.fit(Xtr_aug, ytr_aug)
+    mdl.fit(Xtr, ytr)
     mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
 
     mu_base = np.full_like(yva, base_rate, dtype=np.float64)
@@ -77,13 +62,12 @@ def _fit_one_fold_weights_poisson(
         w[-1] = np.log(1e-12)
         return w
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
     mdl = PoissonRegressor(
         alpha=POISSON_ALPHA,
         max_iter=MAX_ITER,
-        fit_intercept=True,  # intercept is not part of X/feature_names; smoothing rows exclude it
+        fit_intercept=True,
     )
-    mdl.fit(Xtr_aug, ytr_aug)
+    mdl.fit(Xtr, ytr)
     w = np.concatenate(
         [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
     )
@@ -120,13 +104,12 @@ def save_neuron_artifacts_for_model(
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
             w[-1] = np.log(1e-12)
         else:
-            Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
             mdl = PoissonRegressor(
                 alpha=POISSON_ALPHA,
                 max_iter=MAX_ITER,
-                fit_intercept=True,  # intercept is not part of X/feature_names; smoothing rows exclude it
+                fit_intercept=True,
             )
-            mdl.fit(Xtr_aug, ytr_aug)
+            mdl.fit(Xtr, ytr)
             mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
             w = np.concatenate(
                 [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]

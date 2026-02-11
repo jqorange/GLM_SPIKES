@@ -320,7 +320,7 @@ def run_one_session(
     if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
         return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
 
-    for k in ["position", "head_v", "head_v_bin", "roll_bin", "yaw_bin", "pitch_bin"]:
+    for k in ["position", "head_v", "roll", "yaw", "pitch"]:
         data_dict[k] = data_dict[k][:T]
     Y_all = Y50[:T].astype(np.float64)
     data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)

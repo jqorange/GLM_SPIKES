@@ -9,15 +9,11 @@ from .config import (
     AGG_FACTOR,
     DLC_ROOT,
     IMU_ROOT,
-    PITCH_N_BINS,
     POSITION_ROOT,
-    ROLL_N_BINS,
     ROLL_PITCH_TRIM_PERCENTILES,
-    SPEED_N_BINS,
     SPIKE_ROOT,
-    YAW_N_BINS,
 )
-from .design_matrix import bin_col, build_position_index
+from .design_matrix import build_position_index
 
 _ROLL_PITCH_RANGE: tuple[float, float, float, float] | None = None
 
@@ -154,24 +150,22 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
     pos_idx, n_pos = build_position_index(pos_df["head_x"].values, pos_df["head_y"].values)
 
     head_v = dlc_df["head_v"].values.astype(np.float32)
-    head_v_bin = bin_col(head_v, n_bins=SPEED_N_BINS, vmin=0, vmax=1.5)
 
     roll_start, roll_width, pitch_start, pitch_width = _load_global_roll_pitch_ranges()
     roll_shift = shift_angles(imu_df["roll"].values, roll_start)
     pitch_shift = shift_angles(imu_df["pitch"].values, pitch_start)
-    roll_bin = bin_col(roll_shift, n_bins=ROLL_N_BINS, vmin=0, vmax=roll_width)
-    yaw_bin = bin_col(imu_df["yaw"].values, n_bins=YAW_N_BINS, vmin=0, vmax=2 * np.pi)
-    pitch_bin = bin_col(pitch_shift, n_bins=PITCH_N_BINS, vmin=0, vmax=pitch_width)
+    yaw = imu_df["yaw"].values.astype(np.float32)
 
     return {
         "T": int(L),
         "position": pos_idx.astype(np.int32),
         "n_pos": int(n_pos),
         "head_v": head_v.astype(np.float32),
-        "head_v_bin": head_v_bin.astype(np.int32),
-        "roll_bin": roll_bin.astype(np.int32),
-        "yaw_bin": yaw_bin.astype(np.int32),
-        "pitch_bin": pitch_bin.astype(np.int32),
+        "roll": roll_shift.astype(np.float32),
+        "yaw": yaw.astype(np.float32),
+        "pitch": pitch_shift.astype(np.float32),
+        "roll_width": float(roll_width),
+        "pitch_width": float(pitch_width),
     }
 
 
@@ -217,5 +211,4 @@ def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarr
     updated["head_v_raw"] = head_v.astype(np.float32)
     updated["head_v"] = speed_res.astype(np.float32)
     updated["speed_hat"] = speed_hat.astype(np.float32)
-    updated["head_v_bin"] = bin_col(speed_res, n_bins=SPEED_N_BINS)
     return updated
