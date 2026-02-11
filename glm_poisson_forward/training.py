@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
 from .design_matrix import build_smoothness_rows, ensure_feature_mapping, model_key_from_vars
-from .metrics import compute_llhi_bps_poisson_vs_baseline, build_oof_constant_mu
+from .metrics import build_oof_constant_mu, compute_deviance_explained_poisson_vs_baseline
 
 
 def _augment_with_smoothness(
@@ -44,8 +44,8 @@ def fit_predict_one_fold_poisson(
     if mean_tr <= 0:
         mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
         mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-        llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
-        return mu_va.astype(np.float32), float(llhi)
+        dev_expl = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+        return mu_va.astype(np.float32), float(dev_expl)
 
     Xtr_aug, ytr_aug = _augment_with_smoothness(Xtr, ytr, feature_names)
     mdl = PoissonRegressor(
@@ -57,8 +57,8 @@ def fit_predict_one_fold_poisson(
     mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
 
     mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-    llhi = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
-    return mu_va.astype(np.float32), float(llhi)
+    dev_expl = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+    return mu_va.astype(np.float32), float(dev_expl)
 
 
 def _fit_one_fold_weights_poisson(
@@ -103,7 +103,7 @@ def save_neuron_artifacts_for_model(
     neuron_dir.mkdir(parents=True, exist_ok=True)
     ensure_feature_mapping(str(model_dir), feature_names)
 
-    fold_llhi: List[float] = []
+    fold_dev_expl: List[float] = []
     mu_oof = np.full_like(y_all, np.nan, dtype=np.float32)
 
     for k, (tr, va) in enumerate(folds, start=1):
@@ -144,25 +144,25 @@ def save_neuron_artifacts_for_model(
             hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
 
         mu_base = np.full_like(yva, base_rate, dtype=np.float64)
-        llhi_val = compute_llhi_bps_poisson_vs_baseline(yva, mu_va, mu_base)
-        fold_llhi.append(float(llhi_val))
-        pd.DataFrame({"fold": [k], "llhi_bits_per_spike": [float(llhi_val)]}).to_csv(
-            fold_dir / "llhi.csv", index=False
+        dev_expl_val = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+        fold_dev_expl.append(float(dev_expl_val))
+        pd.DataFrame({"fold": [k], "deviance_explained": [float(dev_expl_val)]}).to_csv(
+            fold_dir / "deviance_explained.csv", index=False
         )
 
         mu_oof[va] = mu_va.astype(np.float32)
 
     mu_base_oof = build_oof_constant_mu(y_all, folds)
-    llhi_oof = compute_llhi_bps_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)
-    mean_llhi = float(np.nanmean(fold_llhi))
+    dev_expl_oof = compute_deviance_explained_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)
+    mean_dev_expl = float(np.nanmean(fold_dev_expl))
 
     with open(neuron_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(
             {
                 "model": model_vars,
-                "oof_llhi_bits_per_spike": float(llhi_oof),
-                "mean_llhi_over_folds_bits_per_spike": float(mean_llhi),
-                "fold_llhi_bits_per_spike": list(map(float, fold_llhi)),
+                "oof_deviance_explained": float(dev_expl_oof),
+                "mean_deviance_explained_over_folds": float(mean_dev_expl),
+                "fold_deviance_explained": list(map(float, fold_dev_expl)),
                 "poisson_alpha": float(POISSON_ALPHA),
             },
             f,
@@ -171,9 +171,9 @@ def save_neuron_artifacts_for_model(
         )
 
     return {
-        "mean_llhi": float(mean_llhi),
-        "fold_llhi": list(map(float, fold_llhi)),
-        "oof_llhi": float(llhi_oof),
+        "mean_deviance_explained": float(mean_dev_expl),
+        "fold_deviance_explained": list(map(float, fold_dev_expl)),
+        "oof_deviance_explained": float(dev_expl_oof),
         "mu_oof": mu_oof,
     }
 
