@@ -6,18 +6,24 @@ from typing import Dict, Tuple
 import numpy as np
 from scipy import ndimage
 
-from glm_poisson_forward.config import POSITION_CELL_CM, SPEED_N_BINS
+from glm_poisson_forward.angle_utils import shift_angles
+from glm_poisson_forward.config import VARIABLE_SPECS
 from glm_poisson_forward.design_matrix import bin_col
 from .config import (
-    ANGLE_N_BINS,
     ANGULAR_K_MAX,
     BIN_SEC,
     BIN_SMOOTH_SIGMA_BINS,
     MIN_BIN_OCCUPANCY_SEC,
+    PITCH_N_BINS,
+    ROLL_N_BINS,
     SHUFFLE_MIN_SEC,
     SPEED_MAX_M_S,
     SPEED_MIN_M_S,
+    YAW_N_BINS,
 )
+
+POSITION_CELL_CM = float(VARIABLE_SPECS.get("Position", {}).get("cell_cm", 8.0))
+SPEED_N_BINS = int(VARIABLE_SPECS.get("Speed", {}).get("n_bins", 15))
 
 
 @dataclass
@@ -39,6 +45,8 @@ class SessionBinning:
     hd_bin: np.ndarray
     roll_bin: np.ndarray
     pitch_bin: np.ndarray
+    roll_width: float
+    pitch_width: float
     x_min: int
     y_min: int
     x_size: int
@@ -54,7 +62,15 @@ class ScoreResult:
     speed_stability: float
 
 
-def build_bins(inputs: TuningInputs) -> SessionBinning:
+@dataclass
+class AngleBinningRanges:
+    roll_start: float
+    roll_width: float
+    pitch_start: float
+    pitch_width: float
+
+
+def build_bins(inputs: TuningInputs, angle_ranges: AngleBinningRanges) -> SessionBinning:
     cell = float(POSITION_CELL_CM)
     x_bin = (inputs.head_x.astype(np.float32) // cell).astype(int)
     y_bin = (inputs.head_y.astype(np.float32) // cell).astype(int)
@@ -65,9 +81,11 @@ def build_bins(inputs: TuningInputs) -> SessionBinning:
     y_size = int(np.max(y_bin) - y_min + 1)
 
     speed_bin = bin_col(inputs.head_v, n_bins=SPEED_N_BINS, vmin=SPEED_MIN_M_S, vmax=SPEED_MAX_M_S)
-    hd_bin = bin_col(inputs.heading_rad, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
-    roll_bin = bin_col(inputs.roll, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
-    pitch_bin = bin_col(inputs.pitch, n_bins=ANGLE_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
+    hd_bin = bin_col(inputs.heading_rad, n_bins=YAW_N_BINS, vmin=0.0, vmax=2.0 * np.pi)
+    roll_shift = shift_angles(inputs.roll, angle_ranges.roll_start)
+    pitch_shift = shift_angles(inputs.pitch, angle_ranges.pitch_start)
+    roll_bin = bin_col(roll_shift, n_bins=ROLL_N_BINS, vmin=0.0, vmax=angle_ranges.roll_width)
+    pitch_bin = bin_col(pitch_shift, n_bins=PITCH_N_BINS, vmin=0.0, vmax=angle_ranges.pitch_width)
 
     return SessionBinning(
         x_bin=x_bin,
@@ -76,6 +94,8 @@ def build_bins(inputs: TuningInputs) -> SessionBinning:
         hd_bin=hd_bin,
         roll_bin=roll_bin,
         pitch_bin=pitch_bin,
+        roll_width=angle_ranges.roll_width,
+        pitch_width=angle_ranges.pitch_width,
         x_min=x_min,
         y_min=y_min,
         x_size=x_size,
@@ -92,28 +112,34 @@ def _vector_length_k(weights: np.ndarray, angles: np.ndarray, k: int) -> float:
     return float(np.abs(vect))
 
 
-def angular_score(angle_bin: np.ndarray, spikes: np.ndarray, mask: np.ndarray) -> Tuple[float, np.ndarray]:
+def angular_score(
+    angle_bin: np.ndarray,
+    spikes: np.ndarray,
+    mask: np.ndarray,
+    *,
+    n_bins: int,
+    angle_width: float = 2.0 * np.pi,
+) -> Tuple[float, np.ndarray]:
     spikes_sel = spikes[mask]
     bins_sel = angle_bin[mask]
 
-    occ = np.bincount(bins_sel, minlength=ANGLE_N_BINS).astype(np.float64)
-    spk = np.bincount(bins_sel, weights=spikes_sel, minlength=ANGLE_N_BINS).astype(np.float64)
+    occ = np.bincount(bins_sel, minlength=n_bins).astype(np.float64)
+    spk = np.bincount(bins_sel, weights=spikes_sel, minlength=n_bins).astype(np.float64)
 
     occ_sec = occ * BIN_SEC
-    rate = np.full(ANGLE_N_BINS, np.nan, dtype=np.float64)
+    rate = np.full(n_bins, np.nan, dtype=np.float64)
     valid = occ_sec >= MIN_BIN_OCCUPANCY_SEC
     with np.errstate(invalid="ignore", divide="ignore"):
         rate[valid] = spk[valid] / occ_sec[valid]
 
     rate = np.nan_to_num(rate, nan=0.0)
-    bin_deg = 360.0 / ANGLE_N_BINS
     sigma_bins = float(BIN_SMOOTH_SIGMA_BINS)
     if sigma_bins > 0:
         rate_smooth = ndimage.gaussian_filter1d(rate, sigma=sigma_bins, mode="wrap")
     else:
         rate_smooth = rate
 
-    angles = np.linspace(0.0, 2 * np.pi, ANGLE_N_BINS, endpoint=False)
+    angles = np.linspace(0.0, float(angle_width), n_bins, endpoint=False)
     weights = np.nan_to_num(rate_smooth, nan=0.0)
     if np.sum(weights) <= 0:
         return float("nan"), rate_smooth
@@ -216,9 +242,21 @@ def compute_scores_for_neuron(inputs: TuningInputs, bins: SessionBinning, neuron
     spikes = inputs.spikes[:, neuron_idx].astype(np.float64)
     mask = valid_speed_mask(inputs.head_v)
 
-    hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask)
-    roll_score, roll_curve = angular_score(bins.roll_bin, spikes, mask)
-    pitch_score, pitch_curve = angular_score(bins.pitch_bin, spikes, mask)
+    hd_score, hd_curve = angular_score(bins.hd_bin, spikes, mask, n_bins=YAW_N_BINS)
+    roll_score, roll_curve = angular_score(
+        bins.roll_bin,
+        spikes,
+        mask,
+        n_bins=ROLL_N_BINS,
+        angle_width=bins.roll_width,
+    )
+    pitch_score, pitch_curve = angular_score(
+        bins.pitch_bin,
+        spikes,
+        mask,
+        n_bins=PITCH_N_BINS,
+        angle_width=bins.pitch_width,
+    )
     s_score = speed_score(inputs.head_v, spikes, mask)
     s_stability = speed_stability(inputs.head_v, spikes, mask)
 
@@ -271,9 +309,25 @@ def compute_shuffle_scores(
 
     for _ in range(n_shuffle):
         sh_spikes = time_shift_spikes(base_spikes, rng)
-        scores["hd_score"].append(angular_score(bins.hd_bin, sh_spikes, mask)[0])
-        scores["roll_score"].append(angular_score(bins.roll_bin, sh_spikes, mask)[0])
-        scores["pitch_score"].append(angular_score(bins.pitch_bin, sh_spikes, mask)[0])
+        scores["hd_score"].append(angular_score(bins.hd_bin, sh_spikes, mask, n_bins=YAW_N_BINS)[0])
+        scores["roll_score"].append(
+            angular_score(
+                bins.roll_bin,
+                sh_spikes,
+                mask,
+                n_bins=ROLL_N_BINS,
+                angle_width=bins.roll_width,
+            )[0]
+        )
+        scores["pitch_score"].append(
+            angular_score(
+                bins.pitch_bin,
+                sh_spikes,
+                mask,
+                n_bins=PITCH_N_BINS,
+                angle_width=bins.pitch_width,
+            )[0]
+        )
         scores["speed_score"].append(speed_score(inputs.head_v, sh_spikes, mask))
         scores["speed_stability"].append(speed_stability(inputs.head_v, sh_spikes, mask))
 

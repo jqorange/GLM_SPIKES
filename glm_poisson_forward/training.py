@@ -10,9 +10,81 @@ from scipy import sparse
 from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
-from .config import FULL_FIT_DIRNAME, MAX_ITER, N_JOBS, POISSON_ALPHA
-from .design_matrix import ensure_feature_mapping, model_key_from_vars
-from .metrics import compute_llhi_bps_poisson
+from .config import (
+    FULL_FIT_DIRNAME,
+    L1_LAMBDA,
+    L1_PROX_LR,
+    L1_PROX_STEPS,
+    MAX_ITER,
+    N_JOBS,
+    POISSON_ALPHA,
+)
+from .design_matrix import build_smoothness_rows, ensure_feature_mapping, model_key_from_vars
+from .metrics import build_oof_constant_mu, compute_deviance_explained_poisson_vs_baseline
+
+
+def _augment_with_smoothness(
+    X: sparse.csr_matrix,
+    y: np.ndarray,
+    feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
+) -> Tuple[sparse.csr_matrix, np.ndarray]:
+    smooth_rows = build_smoothness_rows(feature_names, position_xy_by_idx=position_xy_by_idx)
+    if smooth_rows.shape[0] == 0:
+        return X, y
+    y_smooth = np.zeros(smooth_rows.shape[0], dtype=y.dtype)
+    X_aug = sparse.vstack([X, smooth_rows], format="csr")
+    y_aug = np.concatenate([y, y_smooth])
+    return X_aug, y_aug
+
+
+def _soft_threshold(w: np.ndarray, thr: float) -> np.ndarray:
+    return np.sign(w) * np.maximum(np.abs(w) - thr, 0.0)
+
+
+def _prox_refine_poisson_l1(
+    X: sparse.csr_matrix,
+    y: np.ndarray,
+    w_init: np.ndarray,
+    b_init: float,
+) -> Tuple[np.ndarray, float]:
+    """Warm-start proximal-gradient refinement for Poisson + L1 on coefficients."""
+    if L1_PROX_STEPS <= 0 or L1_LAMBDA <= 0:
+        return w_init.astype(np.float64, copy=False), float(b_init)
+
+    w = w_init.astype(np.float64, copy=True)
+    b = float(b_init)
+    n = float(max(X.shape[0], 1))
+    step = float(L1_PROX_LR)
+
+    for _ in range(int(L1_PROX_STEPS)):
+        eta = X.dot(w) + b
+        np.clip(eta, -20.0, 20.0, out=eta)
+        mu = np.exp(eta)
+        residual = mu - y
+
+        grad_w = np.asarray(X.T.dot(residual)).ravel() / n
+        grad_b = float(np.sum(residual) / n)
+
+        w = _soft_threshold(w - step * grad_w, step * float(L1_LAMBDA))
+        b = b - step * grad_b
+
+    return w, b
+
+
+def _fit_poisson_with_prox_l1(
+    Xtr_aug: sparse.csr_matrix,
+    ytr_aug: np.ndarray,
+) -> Tuple[np.ndarray, float]:
+    mdl = PoissonRegressor(
+        alpha=POISSON_ALPHA,
+        max_iter=MAX_ITER,
+        fit_intercept=True,  # intercept is not part of X/feature_names; smoothing rows exclude it
+    )
+    mdl.fit(Xtr_aug, ytr_aug)
+    w0 = mdl.coef_.ravel().astype(np.float64, copy=False)
+    b0 = float(mdl.intercept_)
+    return _prox_refine_poisson_l1(Xtr_aug, ytr_aug.astype(np.float64, copy=False), w0, b0)
 
 
 def fit_predict_one_fold_poisson(
@@ -20,28 +92,40 @@ def fit_predict_one_fold_poisson(
     y_all: np.ndarray,
     tr_idx: np.ndarray,
     va_idx: np.ndarray,
+    feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, float]:
+
     Xtr, Xva = X_all[tr_idx], X_all[va_idx]
     ytr, yva = y_all[tr_idx].astype(np.float64), y_all[va_idx].astype(np.float64)
-
     mean_tr = float(np.mean(ytr))
+    base_rate = max(mean_tr, 1e-12)
     if mean_tr <= 0:
         mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
-        llhi = compute_llhi_bps_poisson(yva, mu_va)
-        return mu_va.astype(np.float32), float(llhi)
+        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+        dev_exp = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+        return mu_va.astype(np.float32), float(dev_exp)
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
-    mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+    Xtr_aug, ytr_aug = _augment_with_smoothness(
+        Xtr,
+        ytr,
+        feature_names,
+        position_xy_by_idx=position_xy_by_idx,
+    )
+    coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
+    mu_va = np.clip(np.exp(Xva.dot(coef) + intercept).astype(np.float64), 1e-12, None)
 
-    llhi = compute_llhi_bps_poisson(yva, mu_va)
-    return mu_va.astype(np.float32), float(llhi)
+    mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+    dev_exp = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+    return mu_va.astype(np.float32), float(dev_exp)
 
 
 def _fit_one_fold_weights_poisson(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     tr_idx: np.ndarray,
+    feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return w = [coef..., intercept] for one fold (fit on train only)."""
     Xtr = X_all[tr_idx]
@@ -53,10 +137,15 @@ def _fit_one_fold_weights_poisson(
         w[-1] = np.log(1e-12)
         return w
 
-    mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-    mdl.fit(Xtr, ytr)
+    Xtr_aug, ytr_aug = _augment_with_smoothness(
+        Xtr,
+        ytr,
+        feature_names,
+        position_xy_by_idx=position_xy_by_idx,
+    )
+    coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
     w = np.concatenate(
-        [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
+        [coef.astype(np.float32), np.array([intercept], dtype=np.float32)]
     )
     return w
 
@@ -70,11 +159,12 @@ def save_neuron_artifacts_for_model(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None = None,
 ) -> Dict:
     neuron_dir.mkdir(parents=True, exist_ok=True)
     ensure_feature_mapping(str(model_dir), feature_names)
 
-    fold_llhi: List[float] = []
+    fold_dev_exp: List[float] = []
     mu_oof = np.full_like(y_all, np.nan, dtype=np.float32)
 
     for k, (tr, va) in enumerate(folds, start=1):
@@ -85,16 +175,22 @@ def save_neuron_artifacts_for_model(
         ytr, yva = y_all[tr].astype(np.float64), y_all[va].astype(np.float64)
 
         mean_tr = float(np.mean(ytr))
+        base_rate = max(mean_tr, 1e-12)
         if mean_tr <= 0:
             mu_va = np.full_like(yva, 1e-12, dtype=np.float64)
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
             w[-1] = np.log(1e-12)
         else:
-            mdl = PoissonRegressor(alpha=POISSON_ALPHA, max_iter=MAX_ITER, fit_intercept=True)
-            mdl.fit(Xtr, ytr)
-            mu_va = np.clip(mdl.predict(Xva).astype(np.float64), 1e-12, None)
+            Xtr_aug, ytr_aug = _augment_with_smoothness(
+                Xtr,
+                ytr,
+                feature_names,
+                position_xy_by_idx=position_xy_by_idx,
+            )
+            coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
+            mu_va = np.clip(np.exp(Xva.dot(coef) + intercept).astype(np.float64), 1e-12, None)
             w = np.concatenate(
-                [mdl.coef_.ravel().astype(np.float32), np.array([mdl.intercept_], dtype=np.float32)]
+                [coef.astype(np.float32), np.array([intercept], dtype=np.float32)]
             )
 
         pd.DataFrame(
@@ -108,24 +204,26 @@ def save_neuron_artifacts_for_model(
             hf.create_dataset("true_cnt", data=yva.astype(np.float32), compression="gzip")
             hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
 
-        llhi_val = compute_llhi_bps_poisson(yva, mu_va)
-        fold_llhi.append(float(llhi_val))
-        pd.DataFrame({"fold": [k], "llhi_bits_per_spike": [float(llhi_val)]}).to_csv(
-            fold_dir / "llhi.csv", index=False
+        mu_base = np.full_like(yva, base_rate, dtype=np.float64)
+        dev_exp_val = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
+        fold_dev_exp.append(float(dev_exp_val))
+        pd.DataFrame({"fold": [k], "deviance_explained": [float(dev_exp_val)]}).to_csv(
+            fold_dir / "deviance_explained.csv", index=False
         )
 
         mu_oof[va] = mu_va.astype(np.float32)
 
-    llhi_oof = compute_llhi_bps_poisson(y_all, mu_oof)
-    mean_llhi = float(np.nanmean(fold_llhi))
+    mu_base_oof = build_oof_constant_mu(y_all, folds)
+    dev_exp_oof = compute_deviance_explained_poisson_vs_baseline(y_all, mu_oof, mu_base_oof)
+    mean_dev_exp = float(np.nanmean(fold_dev_exp))
 
     with open(neuron_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(
             {
                 "model": model_vars,
-                "oof_llhi_bits_per_spike": float(llhi_oof),
-                "mean_llhi_over_folds_bits_per_spike": float(mean_llhi),
-                "fold_llhi_bits_per_spike": list(map(float, fold_llhi)),
+                "oof_deviance_explained": float(dev_exp_oof),
+                "mean_deviance_explained_over_folds": float(mean_dev_exp),
+                "fold_deviance_explained": list(map(float, fold_dev_exp)),
                 "poisson_alpha": float(POISSON_ALPHA),
             },
             f,
@@ -134,9 +232,9 @@ def save_neuron_artifacts_for_model(
         )
 
     return {
-        "mean_llhi": float(mean_llhi),
-        "fold_llhi": list(map(float, fold_llhi)),
-        "oof_llhi": float(llhi_oof),
+        "mean_deviance_explained": float(mean_dev_exp),
+        "fold_deviance_explained": list(map(float, fold_dev_exp)),
+        "oof_deviance_explained": float(dev_exp_oof),
         "mu_oof": mu_oof,
     }
 
@@ -146,6 +244,7 @@ def save_full_fit_weights_for_all_neurons(
     model_vars: List[str],
     X_all: sparse.csr_matrix,
     feature_names: List[str],
+    position_xy_by_idx: np.ndarray | None,
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
     n_jobs: int = N_JOBS,
@@ -169,7 +268,13 @@ def save_full_fit_weights_for_all_neurons(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = _fit_one_fold_weights_poisson(X_all, y, tr)
+                w = _fit_one_fold_weights_poisson(
+                    X_all,
+                    y,
+                    tr,
+                    feature_names,
+                    position_xy_by_idx=position_xy_by_idx,
+                )
                 ws.append(w)
 
                 fold_dir = neuron_dir / f"fold{k}"

@@ -71,3 +71,22 @@ def load_session_raw(session: str) -> Dict[str, np.ndarray]:
         "pitch": imu_df["pitch"].to_numpy(dtype=np.float32),
         "spikes": spikes_50hz.astype(np.int32),
     }
+
+
+def load_roll_pitch_angles(sessions: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    roll_all: list[np.ndarray] = []
+    pitch_all: list[np.ndarray] = []
+    for session in sessions:
+        paths = session_paths(session)
+        imu_path = paths["imu"]
+        if not imu_path.exists():
+            continue
+        imu_df = pd.read_csv(imu_path, usecols=["roll", "pitch"]).astype(np.float32)
+        roll_all.append(np.mod(imu_df["roll"].to_numpy(dtype=np.float32), 2.0 * np.pi))
+        pitch_all.append(np.mod(imu_df["pitch"].to_numpy(dtype=np.float32), 2.0 * np.pi))
+
+    if not roll_all:
+        empty = np.array([], dtype=np.float32)
+        return empty, empty
+
+    return np.concatenate(roll_all), np.concatenate(pitch_all)

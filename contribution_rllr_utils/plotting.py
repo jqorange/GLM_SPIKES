@@ -8,18 +8,21 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib
+import matplotlib.cm as mpl_cm
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
 
-from glm_poisson_forward.config import VARS_ALL
+from glm_poisson_forward.config import VARIABLE_COMPOSITES, VARS_ALL
 
-HEAD_POSE_FEATURE = "head_pose"
-HEAD_POSE_COMPONENTS = ("roll", "yaw", "pitch")
-INDOOR_COLOR = "#1f77b4"
-OUTDOOR_COLOR = "#ff7f0e"
+blue_cmap = mpl_cm.get_cmap("Blues")
+orange_cmap = mpl_cm.get_cmap("Oranges")
+HEAD_POSE_FEATURE = "H"
+HEAD_POSE_COMPONENTS = tuple(VARIABLE_COMPOSITES.get(HEAD_POSE_FEATURE, ["roll", "yaw", "pitch"]))
+INDOOR_COLOR = blue_cmap(0.75)
+OUTDOOR_COLOR = orange_cmap(0.75)
 PAIRED_LINE_COLOR = (1.0, 0.4, 0.4)
 
 @dataclass
@@ -67,6 +70,13 @@ def _safe_float(x) -> float:
         return float("nan")
 
 
+def _is_missing_value(x) -> bool:
+    if x is None:
+        return True
+    s = str(x).strip()
+    return s == "" or s.lower() in {"nan", "none"}
+
+
 def read_csv_dicts_safe(path: Path) -> List[dict]:
     path = Path(path)
     if (not path.exists()) or path.stat().st_size < 1:
@@ -86,6 +96,17 @@ def read_csv_dicts_safe(path: Path) -> List[dict]:
         rows.append(r)
     return rows
 
+
+
+
+def _resolve_stats_csv(stats_dir: Path, base_name: str, pyramidal_only: bool) -> Path:
+    preferred = f"{base_name}_pyr.csv" if pyramidal_only else f"{base_name}.csv"
+    fallback = f"{base_name}.csv" if pyramidal_only else f"{base_name}_pyr.csv"
+    preferred_path = stats_dir / preferred
+    if preferred_path.exists():
+        return preferred_path
+    fallback_path = stats_dir / fallback
+    return fallback_path
 
 def load_forward_selected_neurons(session_dir: Path, features: Iterable[str]) -> Dict[str, set[int]]:
     feat_list = [str(f).strip() for f in features]
@@ -138,10 +159,10 @@ def base_session_id(session_name: str) -> str:
     return base if base else session_name
 
 
-def compute_head_pose_map(
+def compute_composite_feature_map(
     frac_by_feature: Dict[str, Dict[int, float]],
     *,
-    components: Sequence[str] = HEAD_POSE_COMPONENTS,
+    components: Sequence[str],
     include_missing: bool = False,
     neuron_ids: Optional[Iterable[int]] = None,
 ) -> Dict[int, float]:
@@ -156,7 +177,7 @@ def compute_head_pose_map(
         for m in component_maps:
             target_neurons.update(m.keys())
 
-    head_pose: Dict[int, float] = {}
+    composite: Dict[int, float] = {}
     for ni in target_neurons:
         vals = []
         for m in component_maps:
@@ -167,10 +188,26 @@ def compute_head_pose_map(
                 vals.append(0.0)
         if not vals:
             if include_missing:
-                head_pose[ni] = 0.0
+                composite[ni] = 0.0
             continue
-        head_pose[ni] = float(np.mean(vals))
-    return head_pose
+        composite[ni] = float(np.mean(vals))
+    return composite
+
+
+def compute_head_pose_map(
+    frac_by_feature: Dict[str, Dict[int, float]],
+    *,
+    components: Sequence[str] = HEAD_POSE_COMPONENTS,
+    include_missing: bool = False,
+    neuron_ids: Optional[Iterable[int]] = None,
+) -> Dict[int, float]:
+    """Backward-compatible alias for previous head-pose composite helper."""
+    return compute_composite_feature_map(
+        frac_by_feature,
+        components=components,
+        include_missing=include_missing,
+        neuron_ids=neuron_ids,
+    )
 
 
 def load_dropone_session_stats(
@@ -179,6 +216,7 @@ def load_dropone_session_stats(
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
     use_zscore: bool = True,
+    pyramidal_only: bool = True,
 ) -> Optional[DroponeSessionStats]:
     session = Path(session_dir).name
     group = infer_group(session)
@@ -186,18 +224,19 @@ def load_dropone_session_stats(
         return None
 
     stats_dir = Path(session_dir) / "RLLR_STATS"
-    full_csv = stats_dir / "full_rllr_pyr.csv"
-    contrib_csv = stats_dir / "dropone_rllr_pyr.csv"
+    full_csv = _resolve_stats_csv(stats_dir, "full_rllr", pyramidal_only)
+    contrib_csv = _resolve_stats_csv(stats_dir, "dropone_rllr", pyramidal_only)
 
     contrib_rows = read_csv_dicts_safe(contrib_csv)
     if not contrib_rows:
         return None
+
     full_rows = read_csv_dicts_safe(full_csv)
 
     feat_list = [str(f).strip() for f in features]
     whitelist = None
     if feature_neuron_whitelist is not None:
-        whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
+        whitelist = {f: set(feature_neuron_whitelist[f]) for f in feat_list if f in feature_neuron_whitelist}
 
     full_ll: Dict[int, float] = {}
     unfit_neurons: List[int] = []
@@ -229,7 +268,7 @@ def load_dropone_session_stats(
         std = r.get("rllr_shuf_std", None)
         if use_zscore:
             fv = r.get("rllr_z", None)
-            if fv is None:
+            if _is_missing_value(fv):
                 fv = r.get("rllr", None)
         else:
             fv = r.get("rllr", None)
@@ -272,6 +311,7 @@ def load_dropone_llhi_session_stats(
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
     use_zscore: bool = False,
+    pyramidal_only: bool = True,
 ) -> Optional[DroponeSessionStats]:
     session = Path(session_dir).name
     group = infer_group(session)
@@ -279,8 +319,8 @@ def load_dropone_llhi_session_stats(
         return None
 
     stats_dir = Path(session_dir) / "RLLR_STATS"
-    full_csv = stats_dir / "full_llhi_pyr.csv"
-    contrib_csv = stats_dir / "dropone_llhi_pyr.csv"
+    full_csv = _resolve_stats_csv(stats_dir, "full_llhi", pyramidal_only)
+    contrib_csv = _resolve_stats_csv(stats_dir, "dropone_llhi", pyramidal_only)
 
     contrib_rows = read_csv_dicts_safe(contrib_csv)
     if not contrib_rows:
@@ -290,11 +330,11 @@ def load_dropone_llhi_session_stats(
     feat_list = [str(f).strip() for f in features]
     whitelist = None
     if feature_neuron_whitelist is not None:
-        whitelist = {f: set(feature_neuron_whitelist.get(f, set())) for f in feat_list}
+        whitelist = {f: set(feature_neuron_whitelist[f]) for f in feat_list if f in feature_neuron_whitelist}
 
     unfit_neurons: List[int] = []
     full_llhi: Dict[int, float] = {}
-    full_rllr_csv = stats_dir / "full_rllr_pyr.csv"
+    full_rllr_csv = _resolve_stats_csv(stats_dir, "full_rllr", pyramidal_only)
     full_rllr_rows = read_csv_dicts_safe(full_rllr_csv)
     for r in full_rllr_rows:
         ni = r.get("neuron_idx", r.get("neuron", None))
@@ -332,7 +372,7 @@ def load_dropone_llhi_session_stats(
         ni = r.get("neuron_idx", None)
         if use_zscore:
             fv = r.get("delta_llhi_z", None)
-            if fv is None:
+            if _is_missing_value(fv):
                 fv = r.get("delta_llhi", None)
         else:
             fv = r.get("delta_llhi", None)
@@ -373,17 +413,114 @@ def load_dropone_llhi_session_stats(
     )
 
 
+
+
+def load_dropone_rscc_session_stats(
+    session_dir: Path,
+    features: Iterable[str],
+    *,
+    feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+    pyramidal_only: bool = True,
+) -> Optional[DroponeSessionStats]:
+    session = Path(session_dir).name
+    group = infer_group(session)
+    if group is None:
+        return None
+
+    stats_dir = Path(session_dir) / "RLLR_STATS"
+    full_csv = _resolve_stats_csv(stats_dir, "full_llhi", pyramidal_only)
+    contrib_csv = _resolve_stats_csv(stats_dir, "dropone_llhi", pyramidal_only)
+
+    contrib_rows = read_csv_dicts_safe(contrib_csv)
+    if not contrib_rows:
+        return None
+    full_rows = read_csv_dicts_safe(full_csv)
+
+    feat_list = [str(f).strip() for f in features]
+    whitelist = None
+    if feature_neuron_whitelist is not None:
+        whitelist = {f: set(feature_neuron_whitelist[f]) for f in feat_list if f in feature_neuron_whitelist}
+
+    unfit_neurons: List[int] = []
+    full_llhi: Dict[int, float] = {}
+    full_rllr_csv = _resolve_stats_csv(stats_dir, "full_rllr", pyramidal_only)
+    full_rllr_rows = read_csv_dicts_safe(full_rllr_csv)
+    for r in full_rllr_rows:
+        ni = r.get("neuron_idx", r.get("neuron", None))
+        dv = r.get("ll_gain", r.get("full_ll_gain", None))
+        if ni is None or dv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        val = _safe_float(dv)
+        if np.isfinite(val) and val < 0:
+            unfit_neurons.append(idx)
+
+    for r in full_rows:
+        ni = r.get("neuron_idx", r.get("neuron", None))
+        dv = r.get("llhi_full", r.get("full_llhi", None))
+        if ni is None or dv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        val = _safe_float(dv)
+        if np.isfinite(val):
+            full_llhi[idx] = float(val)
+
+    frac: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_mean: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    shuf_std: Dict[str, Dict[int, float]] = {f: {} for f in feat_list}
+    for r in contrib_rows:
+        feat = str(r.get("feature", "")).strip()
+        if feat not in frac:
+            continue
+        allowed = whitelist.get(feat, None) if whitelist is not None else None
+        ni = r.get("neuron_idx", None)
+        fv = r.get("rSCC", None)
+        if ni is None or fv is None:
+            continue
+        try:
+            idx = int(float(str(ni).strip()))
+        except Exception:
+            continue
+        if allowed is not None and idx not in allowed:
+            continue
+        if idx in unfit_neurons:
+            continue
+        val = _safe_float(fv)
+        if np.isfinite(val):
+            frac[feat][idx] = float(val)
+
+    if all(len(frac[f]) == 0 for f in feat_list):
+        return None
+
+    return DroponeSessionStats(
+        session=session,
+        group=group,
+        full_ll_gain={ni: v for ni, v in full_llhi.items() if ni not in unfit_neurons},
+        frac_by_feature=frac,
+        shuf_mean_by_feature=shuf_mean,
+        shuf_std_by_feature=shuf_std,
+        all_neuron_ids=sorted(set(full_llhi.keys()) | set(unfit_neurons)),
+        unfit_neuron_ids=sorted(set(unfit_neurons)),
+    )
 def load_dropone_rllhi_session_stats(
     session_dir: Path,
     features: Iterable[str],
     *,
     feature_neuron_whitelist: Optional[Dict[str, set[int]]] = None,
+    pyramidal_only: bool = True,
 ) -> Optional[DroponeSessionStats]:
     llhi_stats = load_dropone_llhi_session_stats(
         session_dir,
         features,
         feature_neuron_whitelist=feature_neuron_whitelist,
         use_zscore=False,
+        pyramidal_only=pyramidal_only,
     )
     if llhi_stats is None:
         return None
@@ -439,10 +576,16 @@ def collect_dropone_plot_data(
     include_paired_points: bool = False,
     paired_fit_only: bool = False,
     head_pose_components: Sequence[str] = HEAD_POSE_COMPONENTS,
+    composite_features: Optional[Dict[str, Sequence[str]]] = None,
 ) -> DroponePlotData:
+    if composite_features is None:
+        composite_features = {HEAD_POSE_FEATURE: head_pose_components} if include_head_pose else {}
+    else:
+        composite_features = {str(k): tuple(v) for k, v in composite_features.items() if v}
     feat_list = [str(f).strip() for f in features]
-    if include_head_pose and HEAD_POSE_FEATURE not in feat_list:
-        feat_list.append(HEAD_POSE_FEATURE)
+    for comp_name in composite_features:
+        if comp_name not in feat_list:
+            feat_list.append(comp_name)
 
     paired_fit_map: Dict[str, Dict[str, set[int]]] = {}
     if paired_fit_only:
@@ -452,19 +595,23 @@ def collect_dropone_plot_data(
             if g not in ("indoor", "outdoor"):
                 continue
             base_id = base_session_id(st.session)
-            head_pose_map: Dict[int, float] = {}
-            if include_head_pose:
-                head_pose_map = compute_head_pose_map(
+            composite_maps = {
+                cname: compute_composite_feature_map(
                     st.frac_by_feature,
-                    components=head_pose_components,
+                    components=components,
                     include_missing=False,
                     neuron_ids=None,
                 )
+                for cname, components in composite_features.items()
+            }
             for f in feat_list:
-                if f == HEAD_POSE_FEATURE:
-                    m = head_pose_map
+                raw_map = st.frac_by_feature.get(f, {})
+                if raw_map:
+                    m = raw_map
+                elif f in composite_maps:
+                    m = composite_maps[f]
                 else:
-                    m = st.frac_by_feature.get(f, {})
+                    m = {}
                 if not m:
                     continue
                 ids = {int(ni) for ni, val in m.items() if np.isfinite(val)}
@@ -537,20 +684,24 @@ def collect_dropone_plot_data(
             if arr_full.size:
                 full_by_session[g][st.session] = arr_full
 
-        head_pose_map: Dict[int, float] = {}
-        if include_head_pose:
-            head_pose_map = compute_head_pose_map(
+        composite_maps = {
+            cname: compute_composite_feature_map(
                 st.frac_by_feature,
-                components=head_pose_components,
+                components=components,
                 include_missing=include_missing_cells,
                 neuron_ids=eligible,
             )
+            for cname, components in composite_features.items()
+        }
 
         for f in feat_list:
-            if f == HEAD_POSE_FEATURE:
-                m = head_pose_map
+            raw_map = st.frac_by_feature.get(f, {})
+            if raw_map:
+                m = raw_map
+            elif f in composite_maps:
+                m = composite_maps[f]
             else:
-                m = st.frac_by_feature.get(f, {})
+                m = {}
             if not eligible:
                 continue
             eligible_feature = eligible
@@ -570,7 +721,7 @@ def collect_dropone_plot_data(
                     vals_frac.append(float(fracv))
                     if compute_delta:
                         vals_delta.append(float(fracv) * float(ll_gain))
-                if f != HEAD_POSE_FEATURE:
+                if f not in composite_maps:
                     mu = st.shuf_mean_by_feature.get(f, {}).get(ni, np.nan)
                     std = st.shuf_std_by_feature.get(f, {}).get(ni, np.nan)
                     if np.isfinite(mu) and np.isfinite(std) and std > 0:
@@ -695,8 +846,11 @@ def plot_combined_indoor_outdoor(
     vals_in = [data_in.get(f, np.array([], dtype=float)) for f in features_sorted]
     vals_out = [data_out.get(f, np.array([], dtype=float)) for f in features_sorted]
 
-    bp_in = ax.boxplot(vals_in, positions=x - 0.18, widths=0.3, patch_artist=True, showfliers=False)
-    bp_out = ax.boxplot(vals_out, positions=x + 0.18, widths=0.3, patch_artist=True, showfliers=False)
+    x_in_offset = +0.18
+    x_out_offset = -0.18
+
+    bp_in = ax.boxplot(vals_in, positions=x + x_in_offset, widths=0.3, patch_artist=True, showfliers=False)
+    bp_out = ax.boxplot(vals_out, positions=x + x_out_offset, widths=0.3, patch_artist=True, showfliers=False)
 
     for box in bp_in["boxes"]:
         box.set_facecolor(INDOOR_COLOR)
@@ -710,13 +864,13 @@ def plot_combined_indoor_outdoor(
         y = y[np.isfinite(y)]
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
-        ax.scatter(x[i] - 0.18 + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+        ax.scatter(x[i] + x_in_offset + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
 
         y = np.asarray(data_out.get(f, np.array([], dtype=float)), dtype=float)
         y = y[np.isfinite(y)]
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
-        ax.scatter(x[i] + 0.18 + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+        ax.scatter(x[i] + x_out_offset + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
 
         if paired_points is not None:
             pairs = paired_points.get(f, [])
@@ -724,7 +878,7 @@ def plot_combined_indoor_outdoor(
                 if not (np.isfinite(yin) and np.isfinite(yout)):
                     continue
                 ax.plot(
-                    [x[i] - 0.18, x[i] + 0.18],
+                    [x[i] + x_in_offset, x[i] + x_out_offset],
                     [yin, yout],
                     color=PAIRED_LINE_COLOR,
                     alpha=0.35,
@@ -740,8 +894,8 @@ def plot_combined_indoor_outdoor(
 
     ax.legend(
         handles=[
-            Patch(facecolor=INDOOR_COLOR, edgecolor=INDOOR_COLOR, alpha=0.55, label="indoor"),
             Patch(facecolor=OUTDOOR_COLOR, edgecolor=OUTDOOR_COLOR, alpha=0.55, label="outdoor"),
+            Patch(facecolor=INDOOR_COLOR, edgecolor=INDOOR_COLOR, alpha=0.55, label="indoor"),
         ],
         frameon=False,
         loc="upper right",
@@ -848,6 +1002,7 @@ def plot_dropone_suite(
     include_delta_plot: bool = True,
     use_shuffle_line: bool = True,
     paired_points: Optional[Dict[str, List[Tuple[float, float]]]] = None,
+    draw_plots: bool = True,
 ) -> Path:
     suffix = suffix_for_threshold(min_full_ll_gain)
     out_dir = Path(out_dir)
@@ -884,53 +1039,54 @@ def plot_dropone_suite(
         shuffle95_indoor = None
         shuffle95_outdoor = None
 
-    plot_combined_indoor_outdoor(
-        out_dir / f"BOX_{metric_tag}_indoor_outdoor{suffix}.png",
-        title=f"{title_metric} | full ≥ {min_full_ll_gain:g}",
-        ylabel=ylabel,
-        features=features,
-        data_in=plot_data.frac_pooled["indoor"],
-        data_out=plot_data.frac_pooled["outdoor"],
-        paired_points=paired_points,
-        seed=seed,
-        max_scatter_points=max_scatter_points,
-        ylim_pad_frac=ylim_pad_frac,
-        shuffle95_line=shuffle95_combined,
-    )
-
     indoor_means = group_feature_means(plot_data.frac_pooled["indoor"], features)
     outdoor_means = group_feature_means(plot_data.frac_pooled["outdoor"], features)
 
     features_indoor_sorted = sorted(features, key=lambda f: indoor_means.get(f, float("-inf")), reverse=True)
     features_outdoor_sorted = sorted(features, key=lambda f: outdoor_means.get(f, float("-inf")), reverse=True)
 
-    plot_single_group_sorted(
-        out_dir / f"BOX_{metric_tag}_indoor_sorted{suffix}.png",
-        title=f"Indoor | {title_metric}",
-        ylabel=ylabel,
-        group_label="indoor",
-        features_sorted=features_indoor_sorted,
-        data=plot_data.frac_pooled["indoor"],
-        seed=seed,
-        max_scatter_points=max_scatter_points,
-        ylim_pad_frac=ylim_pad_frac,
-        shuffle95_line=shuffle95_indoor,
-    )
+    if draw_plots:
+        plot_combined_indoor_outdoor(
+            out_dir / f"BOX_{metric_tag}_indoor_outdoor{suffix}.png",
+            title=f"{title_metric} | full ≥ {min_full_ll_gain:g}",
+            ylabel=ylabel,
+            features=features,
+            data_in=plot_data.frac_pooled["indoor"],
+            data_out=plot_data.frac_pooled["outdoor"],
+            paired_points=paired_points,
+            seed=seed,
+            max_scatter_points=max_scatter_points,
+            ylim_pad_frac=ylim_pad_frac,
+            shuffle95_line=shuffle95_combined,
+        )
 
-    plot_single_group_sorted(
-        out_dir / f"BOX_{metric_tag}_outdoor_sorted{suffix}.png",
-        title=f"Outdoor | {title_metric}",
-        ylabel=ylabel,
-        group_label="outdoor",
-        features_sorted=features_outdoor_sorted,
-        data=plot_data.frac_pooled["outdoor"],
-        seed=seed,
-        max_scatter_points=max_scatter_points,
-        ylim_pad_frac=ylim_pad_frac,
-        shuffle95_line=shuffle95_outdoor,
-    )
+        plot_single_group_sorted(
+            out_dir / f"BOX_{metric_tag}_indoor_sorted{suffix}.png",
+            title=f"Indoor | {title_metric}",
+            ylabel=ylabel,
+            group_label="indoor",
+            features_sorted=features_indoor_sorted,
+            data=plot_data.frac_pooled["indoor"],
+            seed=seed,
+            max_scatter_points=max_scatter_points,
+            ylim_pad_frac=ylim_pad_frac,
+            shuffle95_line=shuffle95_indoor,
+        )
 
-    if plot_data.has_full:
+        plot_single_group_sorted(
+            out_dir / f"BOX_{metric_tag}_outdoor_sorted{suffix}.png",
+            title=f"Outdoor | {title_metric}",
+            ylabel=ylabel,
+            group_label="outdoor",
+            features_sorted=features_outdoor_sorted,
+            data=plot_data.frac_pooled["outdoor"],
+            seed=seed,
+            max_scatter_points=max_scatter_points,
+            ylim_pad_frac=ylim_pad_frac,
+            shuffle95_line=shuffle95_outdoor,
+        )
+
+    if plot_data.has_full and draw_plots:
         plot_combined_indoor_outdoor(
             out_dir / f"BOX_full_ll_gain_indoor_outdoor{suffix}.png",
             title=f"Full LL gain | ≥ {min_full_ll_gain:g}",

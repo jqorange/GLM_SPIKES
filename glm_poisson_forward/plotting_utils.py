@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
 from scipy.ndimage import gaussian_filter1d
 
 from .config import BIN_MS, PLOT_END_SEC, PLOT_SMOOTH_MS, PLOT_START_SEC, PLOT_ZSCORE
@@ -70,16 +70,16 @@ def plot_fitting_curve(
         lab_pred = "Pred rate (smoothed)"
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(11, 4))
-    plt.plot(t_w, y_plot, label=lab_true, linewidth=2)
-    plt.plot(t_w, mu_plot, label=lab_pred, linewidth=1.6, alpha=0.9)
-    plt.xlabel("Time (s)")
-    plt.ylabel(ylab)
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
-    plt.close()
+    fig = Figure(figsize=(11, 4))
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(t_w, y_plot, label=lab_true, linewidth=2)
+    ax.plot(t_w, mu_plot, label=lab_pred, linewidth=1.6, alpha=0.9)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylab)
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200)
 
 
 def load_oof_from_neuron_dir(neuron_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -112,4 +112,3 @@ def load_oof_from_neuron_dir(neuron_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
         y_oof = np.where(np.isfinite(y_oof), y_oof, m)
 
     return y_oof, mu_oof
-

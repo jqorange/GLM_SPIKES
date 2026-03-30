@@ -27,6 +27,60 @@ def compute_llhi_bps_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> float:
     return (ll_m - ll_b) / (nsp * np.log(2))
 
 
+def compute_llhi_bps_poisson_vs_baseline(
+    y_cnt: np.ndarray,
+    mu_pred: np.ndarray,
+    mu_base: np.ndarray,
+) -> float:
+    y = np.asarray(y_cnt, dtype=np.float64).ravel()
+    mu = np.asarray(mu_pred, dtype=np.float64).ravel()
+    mu0 = np.asarray(mu_base, dtype=np.float64).ravel()
+    if y.size == 0:
+        return float("nan")
+
+    ll_m = poisson_ll_noconst(y, mu)
+    ll_b = poisson_ll_noconst(y, mu0)
+
+    nsp = float(np.sum(y))
+    if nsp <= 0:
+        return float("nan")
+    return (ll_m - ll_b) / (nsp * np.log(2))
+
+
+def poisson_deviance(y_cnt: np.ndarray, mu_pred: np.ndarray) -> float:
+    y = np.asarray(y_cnt, dtype=np.float64).ravel()
+    mu = np.asarray(mu_pred, dtype=np.float64).ravel()
+    if y.size == 0:
+        return float("nan")
+
+    mu = np.clip(mu, 1e-12, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.ones_like(y, dtype=np.float64)
+        pos = y > 0
+        ratio[pos] = y[pos] / mu[pos]
+        term = np.zeros_like(y, dtype=np.float64)
+        term[pos] = y[pos] * np.log(ratio[pos])
+    return float(2.0 * np.sum(term - (y - mu)))
+
+
+def compute_deviance_explained_poisson_vs_baseline(
+    y_cnt: np.ndarray,
+    mu_pred: np.ndarray,
+    mu_base: np.ndarray,
+) -> float:
+    y = np.asarray(y_cnt, dtype=np.float64).ravel()
+    mu = np.asarray(mu_pred, dtype=np.float64).ravel()
+    mu0 = np.asarray(mu_base, dtype=np.float64).ravel()
+    if y.size == 0:
+        return float("nan")
+
+    dev_model = poisson_deviance(y, mu)
+    dev_base = poisson_deviance(y, mu0)
+    if not np.isfinite(dev_model) or not np.isfinite(dev_base) or dev_base <= 0:
+        return float("nan")
+    return float(1.0 - dev_model / dev_base)
+
+
 def dll_bits_series_poisson(y_cnt: np.ndarray, mu_pred: np.ndarray) -> np.ndarray:
     y = np.asarray(y_cnt, dtype=np.float64).ravel()
     mu = np.asarray(mu_pred, dtype=np.float64).ravel()

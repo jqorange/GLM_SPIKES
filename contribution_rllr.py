@@ -14,6 +14,7 @@ from __future__ import annotations
 import faulthandler
 
 faulthandler.enable()
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -40,9 +41,11 @@ from contribution_rllr_utils import (
 from glm_poisson_forward.config import (
     N_JOBS,
     SEED,
+    VARIABLE_COMPOSITES,
     VARS_ALL,
     WEIGHTS_BASE,
 )
+from glm_poisson_forward.io_utils import warmup_global_circular_trim_ranges
 
 MIN_FULL_LL_GAIN = 0.0
 MIN_FULL_LLHI = 0.0
@@ -53,8 +56,10 @@ N_SHUFFLE = 200
 
 def _plot_features() -> List[str]:
     plot_features = VARS_ALL[:]
-    if INCLUDE_HEAD_POSE and HEAD_POSE_FEATURE not in plot_features:
-        plot_features.append(HEAD_POSE_FEATURE)
+    if INCLUDE_HEAD_POSE:
+        for comp_name in VARIABLE_COMPOSITES:
+            if comp_name not in plot_features:
+                plot_features.append(comp_name)
     return plot_features
 
 
@@ -90,6 +95,7 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
         include_head_pose=INCLUDE_HEAD_POSE,
         include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
         head_pose_components=HEAD_POSE_COMPONENTS,
+        composite_features=VARIABLE_COMPOSITES if INCLUDE_HEAD_POSE else {},
     )
     summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "RLLR_SUMMARY",
@@ -117,8 +123,9 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
 
     rllr_z_stats = []
     for r in results:
-        z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-        for feat in VARS_ALL:
+        feature_keys = sorted(r.contrib_rllr_by_feature_by_neuron.keys())
+        z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in feature_keys}
+        for feat in feature_keys:
             for ni, val in r.contrib_rllr_by_feature_by_neuron.get(feat, {}).items():
                 mu = r.shuf_mean_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
                 std = r.shuf_std_rllr_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
@@ -150,6 +157,7 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
         include_head_pose=INCLUDE_HEAD_POSE,
         include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
         head_pose_components=HEAD_POSE_COMPONENTS,
+        composite_features=VARIABLE_COMPOSITES if INCLUDE_HEAD_POSE else {},
     )
     rllr_z_summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "RLLR_SUMMARY",
@@ -198,6 +206,7 @@ def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> 
         include_head_pose=INCLUDE_HEAD_POSE,
         include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
         head_pose_components=HEAD_POSE_COMPONENTS,
+        composite_features=VARIABLE_COMPOSITES if INCLUDE_HEAD_POSE else {},
     )
     llhi_summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "LLHI_SUMMARY",
@@ -225,8 +234,9 @@ def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> 
 
     llhi_z_stats = []
     for r in results:
-        z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-        for feat in VARS_ALL:
+        feature_keys = sorted(r.contrib_delta_llhi_by_feature_by_neuron.keys())
+        z_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in feature_keys}
+        for feat in feature_keys:
             for ni, val in r.contrib_delta_llhi_by_feature_by_neuron.get(feat, {}).items():
                 mu = r.shuf_mean_delta_llhi_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
                 std = r.shuf_std_delta_llhi_by_feature_by_neuron.get(feat, {}).get(ni, np.nan)
@@ -258,6 +268,7 @@ def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> 
         include_head_pose=INCLUDE_HEAD_POSE,
         include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
         head_pose_components=HEAD_POSE_COMPONENTS,
+        composite_features=VARIABLE_COMPOSITES if INCLUDE_HEAD_POSE else {},
     )
     llhi_z_summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "LLHI_SUMMARY",
@@ -284,8 +295,9 @@ def _plot_rllhi_suite(results: List[SessionResult], plot_features: List[str]) ->
     for r in results:
         if not r.full_llhi_by_neuron or not any(r.contrib_delta_llhi_by_feature_by_neuron.values()):
             continue
-        rllhi_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in VARS_ALL}
-        for feat in VARS_ALL:
+        feature_keys = sorted(r.contrib_delta_llhi_by_feature_by_neuron.keys())
+        rllhi_by_feature: Dict[str, Dict[int, float]] = {v: {} for v in feature_keys}
+        for feat in feature_keys:
             for ni, delta_val in r.contrib_delta_llhi_by_feature_by_neuron.get(feat, {}).items():
                 full_val = r.full_llhi_by_neuron.get(ni, np.nan)
                 if not np.isfinite(full_val) or not np.isfinite(delta_val) or full_val == 0:
@@ -298,8 +310,8 @@ def _plot_rllhi_suite(results: List[SessionResult], plot_features: List[str]) ->
                     group=r.group,
                     full_ll_gain=r.full_llhi_by_neuron,
                     frac_by_feature=rllhi_by_feature,
-                    shuf_mean_by_feature={v: {} for v in VARS_ALL},
-                    shuf_std_by_feature={v: {} for v in VARS_ALL},
+                    shuf_mean_by_feature={v: {} for v in feature_keys},
+                    shuf_std_by_feature={v: {} for v in feature_keys},
                     all_neuron_ids=r.pyramidal_neurons.tolist(),
                     unfit_neuron_ids=r.unfit_neurons,
                 )
@@ -318,6 +330,7 @@ def _plot_rllhi_suite(results: List[SessionResult], plot_features: List[str]) ->
         include_head_pose=INCLUDE_HEAD_POSE,
         include_paired_points=LINK_INDOOR_OUTDOOR_PAIRS,
         head_pose_components=HEAD_POSE_COMPONENTS,
+        composite_features=VARIABLE_COMPOSITES if INCLUDE_HEAD_POSE else {},
     )
     rllhi_summary_csv = plot_dropone_suite(
         WEIGHTS_BASE / "RLLHI_SUMMARY",
@@ -427,8 +440,15 @@ def _plot_group_summaries(
 
 def main():
     WEIGHTS_BASE.mkdir(parents=True, exist_ok=True)
+    warmup_global_circular_trim_ranges(max_workers=max(1, min(int(N_JOBS), 32)))
 
     sessions = list_required_sessions()
+    sessions = [
+        "F5D2_indoor", "F5D3_indoor", "F5D7_indoor", "F5D10_indoor",
+        "F6D10_indoor", "F6D3_indoor", "F6D8_indoor", "F6D7_indoor","F5D2_outdoor", "F5D3_outdoor", "F5D7_outdoor", "F5D10_outdoor",
+        "F6D10_outdoor", "F6D3_outdoor", "F6D8_outdoor","F6D7_outdoor",
+    ]
+    print(sessions)
     if not sessions:
         print("[FATAL] No sessions found with all required inputs.")
         return
@@ -436,18 +456,54 @@ def main():
     dayid2cellinfo = build_dayid_to_cellinfo()
 
     results: List[SessionResult] = []
-    for s in sessions:
-        try:
-            r = compute_session_rllr(s, dayid2cellinfo, n_jobs=N_JOBS, n_shuffle=N_SHUFFLE)
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"[SKIP] {s}: exception {e}")
-            r = None
-        if r is not None:
-            results.append(r)
+    max_workers = max(1, min(int(N_JOBS), len(sessions)))
+    n_jobs_per_session = max(1, int(N_JOBS) // max_workers)
+    if max_workers == 1:
+        for s in sessions:
+            try:
+                r = compute_session_rllr(s, dayid2cellinfo, n_jobs=n_jobs_per_session, n_shuffle=N_SHUFFLE)
+            except Exception:  # pylint: disable=broad-except
+                import traceback
+
+                print(f"[SKIP] {s}: exception")
+                traceback.print_exc()
+                r = None
+            if r is not None:
+                results.append(r)
+    else:
+        print(
+            f"[INFO] Processing {len(sessions)} sessions with {max_workers} worker threads "
+            f"(per-session n_jobs={n_jobs_per_session})"
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    compute_session_rllr,
+                    s,
+                    dayid2cellinfo,
+                    n_jobs=n_jobs_per_session,
+                    n_shuffle=N_SHUFFLE,
+                ): s
+                for s in sessions
+            }
+            for future in as_completed(futures):
+                s = futures[future]
+                try:
+                    r = future.result()
+                except Exception:  # pylint: disable=broad-except
+                    import traceback
+
+                    print(f"[SKIP] {s}: exception")
+                    traceback.print_exc()
+                    continue
+                if r is not None:
+                    results.append(r)
 
     if not results:
         print("[FATAL] No sessions processed successfully.")
         return
+
+    results.sort(key=lambda x: x.session)
 
     plot_features = _plot_features()
 
