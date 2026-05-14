@@ -53,6 +53,17 @@ INCLUDE_UNFIT_CELLS = False
 LINK_INDOOR_OUTDOOR_PAIRS = False
 INCLUDE_HEAD_POSE = True
 N_SHUFFLE = 200
+PLOT_PYRAMIDAL_ONLY = True
+
+
+def _plot_neuron_ids(result: SessionResult) -> List[int]:
+    if PLOT_PYRAMIDAL_ONLY and result.pyramidal_neurons.size > 0:
+        return result.pyramidal_neurons.tolist()
+    return result.all_selected_neurons.tolist()
+
+
+def _plot_scope_label() -> str:
+    return "Pyramidal only" if PLOT_PYRAMIDAL_ONLY else "All selected neurons"
 
 def _plot_features() -> List[str]:
     plot_features = VARS_ALL[:]
@@ -72,7 +83,7 @@ def _build_rllr_stats(results: List[SessionResult]) -> List[DroponeSessionStats]
             frac_by_feature=r.contrib_rllr_by_feature_by_neuron,
             shuf_mean_by_feature=r.shuf_mean_rllr_by_feature_by_neuron,
             shuf_std_by_feature=r.shuf_std_rllr_by_feature_by_neuron,
-            all_neuron_ids=r.pyramidal_neurons.tolist(),
+            all_neuron_ids=_plot_neuron_ids(r),
             unfit_neuron_ids=r.unfit_neurons,
         )
         for r in results
@@ -140,7 +151,7 @@ def _plot_rllr_suite(results: List[SessionResult], plot_features: List[str]) -> 
                     frac_by_feature=z_by_feature,
                     shuf_mean_by_feature=r.shuf_mean_rllr_by_feature_by_neuron,
                     shuf_std_by_feature=r.shuf_std_rllr_by_feature_by_neuron,
-                    all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    all_neuron_ids=_plot_neuron_ids(r),
                     unfit_neuron_ids=r.unfit_neurons,
                 )
             )
@@ -187,7 +198,7 @@ def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> 
             frac_by_feature=r.contrib_delta_llhi_by_feature_by_neuron,
             shuf_mean_by_feature=r.shuf_mean_delta_llhi_by_feature_by_neuron,
             shuf_std_by_feature=r.shuf_std_delta_llhi_by_feature_by_neuron,
-            all_neuron_ids=r.pyramidal_neurons.tolist(),
+            all_neuron_ids=_plot_neuron_ids(r),
             unfit_neuron_ids=r.unfit_neurons,
         )
         for r in results
@@ -251,7 +262,7 @@ def _plot_llhi_suite(results: List[SessionResult], plot_features: List[str]) -> 
                     frac_by_feature=z_by_feature,
                     shuf_mean_by_feature=r.shuf_mean_delta_llhi_by_feature_by_neuron,
                     shuf_std_by_feature=r.shuf_std_delta_llhi_by_feature_by_neuron,
-                    all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    all_neuron_ids=_plot_neuron_ids(r),
                     unfit_neuron_ids=r.unfit_neurons,
                 )
             )
@@ -312,7 +323,7 @@ def _plot_rllhi_suite(results: List[SessionResult], plot_features: List[str]) ->
                     frac_by_feature=rllhi_by_feature,
                     shuf_mean_by_feature={v: {} for v in feature_keys},
                     shuf_std_by_feature={v: {} for v in feature_keys},
-                    all_neuron_ids=r.pyramidal_neurons.tolist(),
+                    all_neuron_ids=_plot_neuron_ids(r),
                     unfit_neuron_ids=r.unfit_neurons,
                 )
             )
@@ -393,7 +404,7 @@ def _plot_group_summaries(
                         getattr(r, feature_metric_attr),
                         components=HEAD_POSE_COMPONENTS,
                         include_missing=INCLUDE_UNFIT_CELLS,
-                        neuron_ids=r.pyramidal_neurons.tolist(),
+                        neuron_ids=_plot_neuron_ids(r),
                     )
                     arr = np.array(list(head_pose_map.values()), dtype=np.float64)
                 else:
@@ -413,7 +424,7 @@ def _plot_group_summaries(
         out_png = WEIGHTS_BASE / f"{output_prefix}_{group}.png"
         plot_summary_figure(
             out_png=out_png,
-            title=f"Poisson GLM | Pyramidal only | {group} | mean ± {CI_LO}-{CI_HI}th (hier bootstrap)",
+            title=f"Poisson GLM | {_plot_scope_label()} | {group} | mean ± {CI_LO}-{CI_HI}th (hier bootstrap)",
             full_stat=full_stat,
             feature_stats=feature_stats,
             full_ylabel=full_ylabel,

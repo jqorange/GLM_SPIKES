@@ -21,29 +21,27 @@ mpl.rcParams["font.sans-serif"] = ["Liberation Sans", "Arial", "DejaVu Sans"]
 
 # ===================== 配置区 =====================
 
-WEIGHTS_BASE = Path(r"/home/js3785/Codes/GLM_test/GLM_Final/weights_Poisson_forward")  # 修改成你的路径
-p = Path(r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F4/day1")
-
-print(p.exists())   
+WEIGHTS_BASE = Path(r"/home/js3785/Codes/GLM_Git/GLM_SPIKES/weights_Poisson_forward")  # 修改成你的路径
+ 
 # DAY_SEARCH_DIRS = [
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F4/day1",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F4/day4",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day2/121_day2",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day3/121_day3",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day4/121_day4",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day5/121_day5",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day6/3E6_day6",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day7/121_day7",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day10/121_day10",
-#     # r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day2/3E6_day2",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day3/3E6_day3",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day5/3E6_day5",
-#     #r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day7/3E6_day7",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day8/3E6_day8",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day9/3E6_day9",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day10/3E6_day10",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day4/3E6_day4",
-#     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day6/121_day6",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F4/day1",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F4/day4",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day2/121_day2",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day3/121_day3",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day4/121_day4",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day5/121_day5",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day6/3E6_day6",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day7/121_day7",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F5/Merged/day10/121_day10",
+#     # r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day2/3E6_day2",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day3/3E6_day3",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day5/3E6_day5",
+#     #r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day7/3E6_day7",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day8/3E6_day8",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day9/3E6_day9",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day10/3E6_day10",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day4/3E6_day4",
+#     r"/local/storage/backup/ayadataA/current/ayadata4/data/FieldRat/2024/F6/Merged/day6/121_day6",
 # ]
 DAY_SEARCH_DIRS = [
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day2/121_day2",
@@ -51,7 +49,7 @@ DAY_SEARCH_DIRS = [
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day7/121_day7",
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F5/Merged/day10/121_day10",
 
-    # r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day2/3E6_day2",
+
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day3/3E6_day3",
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day7/3E6_day7",
     r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F6/Merged/day8/3E6_day8",
@@ -59,6 +57,7 @@ DAY_SEARCH_DIRS = [
 
     # r"/fs/ayadata1-afr77.nbb.cornell.edu/volume4/ayadata4/data/FieldRat/2024/F8/Merged/day2/3E6_day2", # WIP
 ]
+
 DAY_SEARCH_DIRS = [Path(p) for p in DAY_SEARCH_DIRS]
 
 BASE_LETTER_ORDER = "PSRYI"
@@ -81,7 +80,7 @@ FITTED_DENOMINATOR_PRESENCE_SPECS = [
     (f"PSH{'T' if INCLUDE_TIME_VARIABLE else ''}", {"H": {"R", "Y", "I"}}),
     (DEFAULT_PRESENCE_LETTERS, {}),
 ]
-DEFAULT_MIN_FIRING_RATE_HZ = 0.0001
+DEFAULT_MIN_FIRING_RATE_HZ = 0.01
 # ===================== 工具函数 =====================
 
 

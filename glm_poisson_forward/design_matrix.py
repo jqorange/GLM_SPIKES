@@ -207,13 +207,29 @@ def build_smoothness_rows(
     row_idx = 0
     feature_prefixes = feature_names[:n_features]
 
+    def _append_symmetric_difference_row(a: int, b: int, scale: float) -> None:
+        nonlocal row_idx
+        # Add both directions so the pseudo-observation penalty is symmetric in
+        # the coefficient difference rather than favoring one sign.
+        rows.extend([row_idx, row_idx])
+        cols.extend([a, b])
+        data.extend([-scale, scale])
+        row_idx += 1
+
+        rows.extend([row_idx, row_idx])
+        cols.extend([a, b])
+        data.extend([scale, -scale])
+        row_idx += 1
+
     for var in smooth_vars:
         lambda_val = smooth_lambda
         if smooth_lambdas is not None:
             lambda_val = smooth_lambdas.get(var, lambda_val)
         if lambda_val is None or lambda_val <= 0:
             continue
-        sqrt_lambda = float(np.sqrt(lambda_val))
+        # Each edge contributes two mirrored pseudo-observations; split lambda
+        # across them so the local curvature near zero stays comparable.
+        sqrt_lambda = float(np.sqrt(lambda_val / 2.0))
         for prefix in var_to_prefixes.get(var, [var]):
             idx = [
                 i
@@ -259,17 +275,11 @@ def build_smoothness_rows(
                                 edge_pairs.add((a, b))
 
                 for a, b in sorted(edge_pairs):
-                    rows.extend([row_idx, row_idx])
-                    cols.extend([a, b])
-                    data.extend([-sqrt_lambda, sqrt_lambda])
-                    row_idx += 1
+                    _append_symmetric_difference_row(a, b, sqrt_lambda)
                 continue
 
             for j in range(len(idx) - 1):
-                rows.extend([row_idx, row_idx])
-                cols.extend([idx[j], idx[j + 1]])
-                data.extend([-sqrt_lambda, sqrt_lambda])
-                row_idx += 1
+                _append_symmetric_difference_row(idx[j], idx[j + 1], sqrt_lambda)
 
     if row_idx == 0:
         return sparse.csr_matrix((0, n_features), dtype=np.float32)

@@ -17,7 +17,7 @@ def _write_lines(path: Path, lines):
             f.write(s + ("\n" if not str(s).endswith("\n") else ""))
 
 
-def main(use_residual_speed: bool = False, weights_base: Path | None = None):
+def main(weights_base: Path | None = None):
     if weights_base is None:
         weights_base = WEIGHTS_BASE
     weights_base.mkdir(parents=True, exist_ok=True)
@@ -27,12 +27,12 @@ def main(use_residual_speed: bool = False, weights_base: Path | None = None):
     set_pos = list_sessions_position(POSITION_ROOT)
 
     all_present = sorted(list(set_imu & set_spk & set_dlc & set_pos))
-    keep_days = [
-        "F5D2", "F5D3", "F5D7", "F5D10",
-        "F6D10", "F6D3","F6D7", 
-        "F6D8",
-    ]
-    # keep_days = ["F6D8"]
+    # keep_days = [
+    #     "F5D2", "F5D3", "F5D7", "F5D10",
+    #     "F6D10", "F6D3","F6D7",
+    #     "F6D8",
+    # ]
+    keep_days = ["F6D7", "F5D3"]
 
 
     all_present = [
@@ -64,7 +64,6 @@ def main(use_residual_speed: bool = False, weights_base: Path | None = None):
         try:
             ok, msg = run_one_session(
                 session,
-                use_residual_speed=use_residual_speed,
                 weights_base=weights_base,
             )
         except Exception as e:  # pragma: no cover - runtime logging

@@ -23,10 +23,40 @@ WEIGHTS_BASE.mkdir(parents=True, exist_ok=True)
 FULL_FIT_DIRNAME = "FULL_FIT"
 
 # Parallel / CV
-N_JOBS = 128
+N_JOBS = 112
 SEED = 0
 CV_FOLDS = 10
-CV_VAL_FOLDS = 2
+CV_VAL_FOLDS = 1
+
+# Cross-validation split config
+# "grouped_segments":
+#   1. split the full session into CV_TOTAL_SEGMENTS consecutive segments
+#   2. partition them into groups of CV_SEGMENTS_PER_GROUP consecutive segments
+#   3. fold k uses the k-th segment from every group concatenated together as test data
+CV_SPLIT_MODE = "grouped_segments"
+CV_TOTAL_SEGMENTS = 50
+CV_SEGMENTS_PER_GROUP = 10
+CV_SPLIT_MODE_CHOICES = ("grouped_segments",)
+if CV_SPLIT_MODE not in CV_SPLIT_MODE_CHOICES:
+    raise ValueError(
+        f"CV_SPLIT_MODE must be one of {CV_SPLIT_MODE_CHOICES}, got {CV_SPLIT_MODE!r}"
+    )
+if CV_TOTAL_SEGMENTS <= 0:
+    raise ValueError(f"CV_TOTAL_SEGMENTS must be > 0, got {CV_TOTAL_SEGMENTS}")
+if CV_SEGMENTS_PER_GROUP <= 0:
+    raise ValueError(
+        f"CV_SEGMENTS_PER_GROUP must be > 0, got {CV_SEGMENTS_PER_GROUP}"
+    )
+if CV_TOTAL_SEGMENTS % CV_SEGMENTS_PER_GROUP != 0:
+    raise ValueError(
+        "CV_TOTAL_SEGMENTS must be divisible by CV_SEGMENTS_PER_GROUP, got "
+        f"{CV_TOTAL_SEGMENTS} and {CV_SEGMENTS_PER_GROUP}"
+    )
+if CV_FOLDS != CV_SEGMENTS_PER_GROUP:
+    raise ValueError(
+        "CV_FOLDS must equal CV_SEGMENTS_PER_GROUP for grouped segment CV, got "
+        f"{CV_FOLDS} and {CV_SEGMENTS_PER_GROUP}"
+    )
 
 # Bin definitions
 BIN_MS = 20
@@ -53,6 +83,26 @@ if MATCHED_SESSION_ALIGN not in {"start", "end"}:
 # It is generated with 1-second bins and linearly mapped from 0 to 1.
 INCLUDE_TIME_VARIABLE = False
 TIME_BIN_SEC = 60
+
+# Circular trim/bin mode for angle variables with trim_percentiles (e.g. roll/pitch):
+# - False: use one shared trim range estimated across all sessions
+# - True:  each session uses its own percentile-based trim range and bin edges
+TRIM_AND_BIN_PER_SESSION = True
+
+# Optional artifact write suppression:
+# - False: keep writing per-fold small files such as weights.csv, pred.h5,
+#          and deviance_explained.csv
+# - True:  skip these small files to reduce filesystem overhead on cluster runs
+SKIP_SMALL_ARTIFACT_WRITES = True
+
+# Contribution pipeline:
+# - False: prefer reusing forward-search full-model weights when they are already
+#          available and complete
+# - True:  refit the selected full model inside the contribution pipeline using
+#          the exact same fold-wise training routine as glm_poisson_forward
+CONTRIB_FORCE_RECOMPUTE_FULL_MODEL_WEIGHTS = True
+CONTRIB_FIT_SIGNATURE = "glm_poisson_forward_training_v1"
+CONTRIB_STATS_VERSION = 2
 
 # -----------------------------------------------------------------------------
 # Input / variable mapping config
@@ -91,7 +141,7 @@ VARIABLE_SPECS = {
         "kind": "continuous",
         "source": "dlc_final",
         "column": ["bodyCenter1_v"],
-        "n_bins": 30,
+        "n_bins": 15,
         "bin_range": (0.0, 1.5),
         "design_key": "speed",
     },
@@ -99,14 +149,14 @@ VARIABLE_SPECS = {
         "kind": "continuous",
         "source": "imu",
         "column": "roll",
-        "n_bins": 5,
-        "trim_percentiles": (1.0, 99.0),
+        "n_bins": 8,
+        "trim_percentiles": (10.0, 90.0),
     },
     "yaw": {
         "kind": "continuous",
         "source": "imu",
         "column": "yaw",
-        "n_bins": 12,
+        "n_bins": 18,
     },
 
     "pitch": {
@@ -114,7 +164,7 @@ VARIABLE_SPECS = {
         "source": "imu",
         "column": "pitch",
         "n_bins": 8,
-        "trim_percentiles": (1.0, 99.0),
+        "trim_percentiles": (10.0, 90.0),
     },
 
 }
@@ -134,7 +184,7 @@ VARIABLE_COMPOSITES = {
 
 # Forward-selection test threshold
 ALPHA = 0.05
-FORWARD_SEARCH_METRIC = "llhi"  # options: "deviance_explained", "llhi"
+FORWARD_SEARCH_METRIC = "deviance_explained"  # options: "deviance_explained", "llhi"
 FORWARD_SEARCH_METRIC_CHOICES = ("deviance_explained", "llhi")
 if FORWARD_SEARCH_METRIC not in FORWARD_SEARCH_METRIC_CHOICES:
     raise ValueError(
@@ -148,29 +198,29 @@ POISSON_ALPHA = 1e-5  # IMPORTANT: small alpha to avoid over-shrinking for one-h
 
 # Approximate L1 via warm-start proximal-gradient refinement on top of PoissonRegressor.
 # If L1_PROX_STEPS <= 0 or L1_LAMBDA <= 0, this refinement is skipped.
-L1_LAMBDA = 1e-2
-L1_PROX_STEPS = 500
-L1_PROX_LR = 0.05
+L1_LAMBDA = 0.0
+L1_PROX_STEPS = 0
+L1_PROX_LR = 0.0
 
 # Smoothness regularization (pseudo-observation trick)
 # Set per-variable lambdas (>0) to enable smoothing per feature group.
 SMOOTH_LAMBDAS = {
-    "Position": 300.0,
+    "Position": 5.0,
     "Time": 0,
-    "Speed": 1.0,
-    "roll": 1.0,
-    "yaw": 1.0,
-    "pitch": 1.0,
+    "Speed": 5.0,
+    "roll": 10.0,
+    "yaw":5.0,
+    "pitch": 5.0,
 }
 SMOOTH_VARS = list(SMOOTH_LAMBDAS.keys())
 
 # Candidate variable set
 VARS_ALL = list(VARIABLE_SPECS.keys())
 
-MIN_SPEED_CM_S = 0.0  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
+MIN_SPEED_CM_S = 0.05  # minimum head speed (cm/s) to include in fitting; <=0 keeps all
 
 # Fitting-curve plots
-PLOT_N_JOBS = 64  # plotting threads
+PLOT_N_JOBS = 32  # plotting threads
 PLOT_SMOOTH_MS = 500
 PLOT_START_SEC = 600.0
 PLOT_END_SEC = 1200.0

@@ -12,7 +12,14 @@ from scipy import sparse
 from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
-from glm_poisson_forward.config import CV_FOLDS, MAX_ITER, POISSON_ALPHA
+from glm_poisson_forward.config import (
+    CONTRIB_FIT_SIGNATURE,
+    CV_FOLDS,
+    MAX_ITER,
+    POISSON_ALPHA,
+)
+from glm_poisson_forward.design_matrix import ensure_feature_mapping
+from glm_poisson_forward.training import _fit_one_fold_weights_poisson
 
 from .constants import MU_EPS
 
@@ -53,6 +60,46 @@ def load_feature_names_file(model_dir: Path) -> List[str] | None:
     return _load_feature_mapping_file(model_dir)
 
 
+def _fit_spec_path(model_dir: Path) -> Path:
+    return Path(model_dir) / "fit_spec.json"
+
+
+def load_fit_signature(model_dir: Path) -> str | None:
+    fit_spec_path = _fit_spec_path(model_dir)
+    if not fit_spec_path.exists():
+        return None
+    try:
+        with open(fit_spec_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    sig = payload.get("fit_signature")
+    return str(sig) if sig else None
+
+
+def ensure_fit_signature_file(model_dir: Path, fit_signature: str) -> None:
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    fit_spec_path = _fit_spec_path(model_dir)
+    payload = {"fit_signature": str(fit_signature)}
+    with open(fit_spec_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def fit_signature_matches(
+    model_dir: Path,
+    expected_fit_signature: str | None,
+    *,
+    allow_legacy_forward: bool = False,
+) -> bool:
+    if expected_fit_signature is None:
+        return True
+    current = load_fit_signature(model_dir)
+    if current is None:
+        return bool(allow_legacy_forward and expected_fit_signature == CONTRIB_FIT_SIGNATURE)
+    return current == expected_fit_signature
+
+
 def fit_one_fold_weights(
     X_all: sparse.csr_matrix,
     y_all: np.ndarray,
@@ -76,11 +123,22 @@ def fit_one_fold_weights(
     return w
 
 
-def weights_exist_for_neuron(model_dir: Path, neuron_idx1: int, folds_count: int) -> bool:
+def weights_exist_for_neuron(
+    model_dir: Path,
+    neuron_idx1: int,
+    folds_count: int,
+    *,
+    expected_fit_signature: str | None = None,
+    allow_legacy_forward: bool = False,
+) -> bool:
+    if not fit_signature_matches(
+        model_dir,
+        expected_fit_signature,
+        allow_legacy_forward=allow_legacy_forward,
+    ):
+        return False
     nd = model_dir / f"neuron_{neuron_idx1}"
     if not nd.exists():
-        return False
-    if not (nd / "weights_mean.csv").exists():
         return False
     for k in range(1, folds_count + 1):
         if not (nd / f"fold{k}" / "weights.csv").exists():
@@ -97,17 +155,34 @@ def save_weights_for_model(
     neuron_indices: np.ndarray,
     n_jobs: int,
     folds_count: int | None = None,
+    position_xy_by_idx: np.ndarray | None = None,
+    use_forward_fit: bool = False,
+    fit_signature: str | None = None,
+    force_recompute: bool = False,
 ):
     """
     Ensure weights exist for all neuron_indices for this model.
     Only trains missing neurons (caches per neuron).
+
+    When ``use_forward_fit`` is True, reuse the same per-fold fitting logic as
+    glm_poisson_forward so auto-backfilled full-model weights stay compatible
+    with the original forward-search pipeline.
     """
     ensure_feature_names_file(model_dir, feature_names)
+    ensure_feature_mapping(str(model_dir), feature_names)
     folds_count = folds_count or CV_FOLDS
+    if fit_signature is None:
+        fit_signature = CONTRIB_FIT_SIGNATURE if use_forward_fit else "legacy_poisson_regressor"
+    ensure_fit_signature_file(model_dir, fit_signature)
 
     def _one_neuron(neuron_idx: int) -> Tuple[bool, str]:
         idx1 = neuron_idx + 1
-        if weights_exist_for_neuron(model_dir, idx1, folds_count):
+        if (not force_recompute) and weights_exist_for_neuron(
+            model_dir,
+            idx1,
+            folds_count,
+            expected_fit_signature=fit_signature,
+        ):
             return True, "CACHED"
 
         try:
@@ -117,7 +192,16 @@ def save_weights_for_model(
 
             ws = []
             for k, (tr, _va) in enumerate(folds_idx, start=1):
-                w = fit_one_fold_weights(X_all, y, tr)
+                if use_forward_fit:
+                    w = _fit_one_fold_weights_poisson(
+                        X_all,
+                        y,
+                        tr,
+                        feature_names,
+                        position_xy_by_idx=position_xy_by_idx,
+                    )
+                else:
+                    w = fit_one_fold_weights(X_all, y, tr)
                 ws.append(w)
 
                 fd = nd / f"fold{k}"

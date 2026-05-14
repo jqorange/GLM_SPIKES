@@ -7,8 +7,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
 
+from glm_poisson_forward import build_cv_folds
 from glm_poisson_forward.config import (
     CV_FOLDS,
     DLC_ROOT,
@@ -93,17 +93,9 @@ def right_tail_pvalue(z_val: float) -> float:
     return float(0.5 * math.erfc(float(z_val) / math.sqrt(2.0)))
 
 
-def build_minute_block_shuffled_folds(T: int) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Match forward-search CV split: shuffle 1-minute blocks, then do KFold."""
-    rng = np.random.default_rng(SEED)
-    fs = 50
-    block_size = fs * 60
-    idx = np.arange(T)
-    blocks = [idx[i:i + block_size] for i in range(0, T, block_size)]
-    rng.shuffle(blocks)
-    permuted_idx = np.concatenate(blocks) if blocks else idx
-    kf = KFold(n_splits=CV_FOLDS, shuffle=False)
-    return [(permuted_idx[tr], permuted_idx[va]) for tr, va in kf.split(permuted_idx)]
+def build_contribution_folds(T: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Use the exact same CV fold construction as glm_poisson_forward."""
+    return build_cv_folds(T)
 
 
 def ensure_z_pvalue_columns(
@@ -245,8 +237,8 @@ def compute_session_rllr(
         f"with forward-selected models={len(pyr_models)}",
     )
 
-    T_valid = int(data_dict.get("T", T))
-    folds_idx = build_minute_block_shuffled_folds(T_valid)
+    T_valid = int(data_dict["T"])
+    folds_idx = build_contribution_folds(T_valid)
 
     X_cache: Dict[str, Tuple[np.ndarray, List[str], str]] = {}
 

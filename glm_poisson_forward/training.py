@@ -6,7 +6,7 @@ import h5py
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from scipy import sparse
+from scipy import optimize, sparse
 from sklearn.linear_model import PoissonRegressor
 from tqdm import tqdm
 
@@ -18,24 +18,17 @@ from .config import (
     MAX_ITER,
     N_JOBS,
     POISSON_ALPHA,
+    SKIP_SMALL_ARTIFACT_WRITES,
 )
 from .design_matrix import build_smoothness_rows, ensure_feature_mapping, model_key_from_vars
 from .metrics import build_oof_constant_mu, compute_deviance_explained_poisson_vs_baseline
 
 
-def _augment_with_smoothness(
-    X: sparse.csr_matrix,
-    y: np.ndarray,
+def _build_smoothness_matrix(
     feature_names: List[str],
     position_xy_by_idx: np.ndarray | None = None,
-) -> Tuple[sparse.csr_matrix, np.ndarray]:
-    smooth_rows = build_smoothness_rows(feature_names, position_xy_by_idx=position_xy_by_idx)
-    if smooth_rows.shape[0] == 0:
-        return X, y
-    y_smooth = np.zeros(smooth_rows.shape[0], dtype=y.dtype)
-    X_aug = sparse.vstack([X, smooth_rows], format="csr")
-    y_aug = np.concatenate([y, y_smooth])
-    return X_aug, y_aug
+) -> sparse.csr_matrix:
+    return build_smoothness_rows(feature_names, position_xy_by_idx=position_xy_by_idx)
 
 
 def _soft_threshold(w: np.ndarray, thr: float) -> np.ndarray:
@@ -43,8 +36,9 @@ def _soft_threshold(w: np.ndarray, thr: float) -> np.ndarray:
 
 
 def _prox_refine_poisson_l1(
-    X: sparse.csr_matrix,
-    y: np.ndarray,
+    X_data: sparse.csr_matrix,
+    y_data: np.ndarray,
+    smooth_rows: sparse.csr_matrix,
     w_init: np.ndarray,
     b_init: float,
 ) -> Tuple[np.ndarray, float]:
@@ -54,17 +48,24 @@ def _prox_refine_poisson_l1(
 
     w = w_init.astype(np.float64, copy=True)
     b = float(b_init)
-    n = float(max(X.shape[0], 1))
+    n = float(max(X_data.shape[0] + smooth_rows.shape[0], 1))
     step = float(L1_PROX_LR)
 
     for _ in range(int(L1_PROX_STEPS)):
-        eta = X.dot(w) + b
-        np.clip(eta, -20.0, 20.0, out=eta)
-        mu = np.exp(eta)
-        residual = mu - y
+        eta_data = np.asarray(X_data.dot(w)).ravel() + b
+        np.clip(eta_data, -20.0, 20.0, out=eta_data)
+        mu_data = np.exp(eta_data)
+        residual_data = mu_data - y_data
 
-        grad_w = np.asarray(X.T.dot(residual)).ravel() / n
-        grad_b = float(np.sum(residual) / n)
+        grad_w = np.asarray(X_data.T.dot(residual_data)).ravel()
+        if smooth_rows.shape[0] > 0:
+            eta_smooth = np.asarray(smooth_rows.dot(w)).ravel()
+            np.clip(eta_smooth, -20.0, 20.0, out=eta_smooth)
+            mu_smooth = np.exp(eta_smooth)
+            grad_w += np.asarray(smooth_rows.T.dot(mu_smooth)).ravel()
+
+        grad_w = grad_w / n + float(POISSON_ALPHA) * w
+        grad_b = float(np.sum(residual_data) / n)
 
         w = _soft_threshold(w - step * grad_w, step * float(L1_LAMBDA))
         b = b - step * grad_b
@@ -73,18 +74,67 @@ def _prox_refine_poisson_l1(
 
 
 def _fit_poisson_with_prox_l1(
-    Xtr_aug: sparse.csr_matrix,
-    ytr_aug: np.ndarray,
+    X_data: sparse.csr_matrix,
+    y_data: np.ndarray,
+    smooth_rows: sparse.csr_matrix,
 ) -> Tuple[np.ndarray, float]:
     mdl = PoissonRegressor(
         alpha=POISSON_ALPHA,
         max_iter=MAX_ITER,
-        fit_intercept=True,  # intercept is not part of X/feature_names; smoothing rows exclude it
+        fit_intercept=True,
     )
-    mdl.fit(Xtr_aug, ytr_aug)
+    mdl.fit(X_data, y_data)
     w0 = mdl.coef_.ravel().astype(np.float64, copy=False)
     b0 = float(mdl.intercept_)
-    return _prox_refine_poisson_l1(Xtr_aug, ytr_aug.astype(np.float64, copy=False), w0, b0)
+
+    n_total = float(max(X_data.shape[0] + smooth_rows.shape[0], 1))
+    alpha = float(POISSON_ALPHA)
+
+    def _objective_and_grad(params: np.ndarray) -> Tuple[float, np.ndarray]:
+        w = params[:-1]
+        b = float(params[-1])
+
+        eta_data = np.asarray(X_data.dot(w)).ravel() + b
+        np.clip(eta_data, -20.0, 20.0, out=eta_data)
+        mu_data = np.exp(eta_data)
+
+        loss = float(np.sum(mu_data - y_data * eta_data))
+        grad_w = np.asarray(X_data.T.dot(mu_data - y_data)).ravel()
+        grad_b = float(np.sum(mu_data - y_data))
+
+        if smooth_rows.shape[0] > 0:
+            eta_smooth = np.asarray(smooth_rows.dot(w)).ravel()
+            np.clip(eta_smooth, -20.0, 20.0, out=eta_smooth)
+            mu_smooth = np.exp(eta_smooth)
+            loss += float(np.sum(mu_smooth))
+            grad_w += np.asarray(smooth_rows.T.dot(mu_smooth)).ravel()
+
+        loss = loss / n_total + 0.5 * alpha * float(np.dot(w, w))
+        grad_w = grad_w / n_total + alpha * w
+        grad_b = grad_b / n_total
+        grad = np.concatenate([grad_w, np.array([grad_b], dtype=np.float64)])
+        return loss, grad
+
+    x0 = np.concatenate([w0, np.array([b0], dtype=np.float64)])
+    opt = optimize.minimize(
+        fun=_objective_and_grad,
+        x0=x0,
+        jac=True,
+        method="L-BFGS-B",
+        options={"maxiter": int(MAX_ITER)},
+    )
+    if not opt.success and not np.isfinite(opt.fun):
+        raise RuntimeError(f"Poisson fit failed: {opt.message}")
+
+    w_opt = np.asarray(opt.x[:-1], dtype=np.float64)
+    b_opt = float(opt.x[-1])
+    return _prox_refine_poisson_l1(
+        X_data,
+        y_data.astype(np.float64, copy=False),
+        smooth_rows,
+        w_opt,
+        b_opt,
+    )
 
 
 def fit_predict_one_fold_poisson(
@@ -106,13 +156,11 @@ def fit_predict_one_fold_poisson(
         dev_exp = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
         return mu_va.astype(np.float32), float(dev_exp)
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(
-        Xtr,
-        ytr,
+    smooth_rows = _build_smoothness_matrix(
         feature_names,
         position_xy_by_idx=position_xy_by_idx,
     )
-    coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
+    coef, intercept = _fit_poisson_with_prox_l1(Xtr, ytr, smooth_rows)
     mu_va = np.clip(np.exp(Xva.dot(coef) + intercept).astype(np.float64), 1e-12, None)
 
     mu_base = np.full_like(yva, base_rate, dtype=np.float64)
@@ -137,13 +185,11 @@ def _fit_one_fold_weights_poisson(
         w[-1] = np.log(1e-12)
         return w
 
-    Xtr_aug, ytr_aug = _augment_with_smoothness(
-        Xtr,
-        ytr,
+    smooth_rows = _build_smoothness_matrix(
         feature_names,
         position_xy_by_idx=position_xy_by_idx,
     )
-    coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
+    coef, intercept = _fit_poisson_with_prox_l1(Xtr, ytr, smooth_rows)
     w = np.concatenate(
         [coef.astype(np.float32), np.array([intercept], dtype=np.float32)]
     )
@@ -169,7 +215,8 @@ def save_neuron_artifacts_for_model(
 
     for k, (tr, va) in enumerate(folds, start=1):
         fold_dir = neuron_dir / f"fold{k}"
-        fold_dir.mkdir(parents=True, exist_ok=True)
+        if not SKIP_SMALL_ARTIFACT_WRITES:
+            fold_dir.mkdir(parents=True, exist_ok=True)
 
         Xtr, Xva = X_all[tr], X_all[va]
         ytr, yva = y_all[tr].astype(np.float64), y_all[va].astype(np.float64)
@@ -181,35 +228,35 @@ def save_neuron_artifacts_for_model(
             w = np.zeros(Xtr.shape[1] + 1, dtype=np.float32)
             w[-1] = np.log(1e-12)
         else:
-            Xtr_aug, ytr_aug = _augment_with_smoothness(
-                Xtr,
-                ytr,
+            smooth_rows = _build_smoothness_matrix(
                 feature_names,
                 position_xy_by_idx=position_xy_by_idx,
             )
-            coef, intercept = _fit_poisson_with_prox_l1(Xtr_aug, ytr_aug)
+            coef, intercept = _fit_poisson_with_prox_l1(Xtr, ytr, smooth_rows)
             mu_va = np.clip(np.exp(Xva.dot(coef) + intercept).astype(np.float64), 1e-12, None)
             w = np.concatenate(
                 [coef.astype(np.float32), np.array([intercept], dtype=np.float32)]
             )
 
-        pd.DataFrame(
-            w.reshape(1, -1),
-            index=[f"neuron_{neuron_index+1}"],
-            columns=feature_names,
-        ).to_csv(fold_dir / "weights.csv")
+        if not SKIP_SMALL_ARTIFACT_WRITES:
+            pd.DataFrame(
+                w.reshape(1, -1),
+                index=[f"neuron_{neuron_index+1}"],
+                columns=feature_names,
+            ).to_csv(fold_dir / "weights.csv")
 
-        with h5py.File(fold_dir / "pred.h5", "w") as hf:
-            hf.create_dataset("pred_mu", data=mu_va.astype(np.float32), compression="gzip")
-            hf.create_dataset("true_cnt", data=yva.astype(np.float32), compression="gzip")
-            hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
+            with h5py.File(fold_dir / "pred.h5", "w") as hf:
+                hf.create_dataset("pred_mu", data=mu_va.astype(np.float32), compression="gzip")
+                hf.create_dataset("true_cnt", data=yva.astype(np.float32), compression="gzip")
+                hf.create_dataset("va_idx", data=np.asarray(va, dtype=np.int64), compression="gzip")
 
         mu_base = np.full_like(yva, base_rate, dtype=np.float64)
         dev_exp_val = compute_deviance_explained_poisson_vs_baseline(yva, mu_va, mu_base)
         fold_dev_exp.append(float(dev_exp_val))
-        pd.DataFrame({"fold": [k], "deviance_explained": [float(dev_exp_val)]}).to_csv(
-            fold_dir / "deviance_explained.csv", index=False
-        )
+        if not SKIP_SMALL_ARTIFACT_WRITES:
+            pd.DataFrame({"fold": [k], "deviance_explained": [float(dev_exp_val)]}).to_csv(
+                fold_dir / "deviance_explained.csv", index=False
+            )
 
         mu_oof[va] = mu_va.astype(np.float32)
 

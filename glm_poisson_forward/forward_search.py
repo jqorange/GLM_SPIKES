@@ -9,37 +9,31 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy import sparse
-from sklearn.model_selection import KFold
 from tqdm import tqdm
 
 from .config import (
     ALPHA,
     CV_FOLDS,
+    CV_SEGMENTS_PER_GROUP,
+    CV_SPLIT_MODE,
+    CV_TOTAL_SEGMENTS,
     CV_VAL_FOLDS,
     FORWARD_SEARCH_METRIC,
     INPUT_FILES,
-    MATCH_INDOOR_OUTDOOR_LENGTHS,
-    MAX_MISMATCH_FRAMES_50HZ,
-    MIN_SPEED_CM_S,
     N_JOBS,
     PLOT_N_JOBS,
     PLOT_END_SEC,
     PLOT_START_SEC,
     PLOT_SMOOTH_MS,
     PLOT_ZSCORE,
-    SEED,
+    SKIP_SMALL_ARTIFACT_WRITES,
     VARS_ALL,
     WEIGHTS_BASE,
 )
 from .design_matrix import build_design_matrix, model_key_from_vars
 from .io_utils import (
-    apply_residual_speed,
-    filter_by_min_speed,
-    load_spikes_50hz_counts,
-    matched_pair_target_length_50hz,
-    rebuild_inputs_50hz,
+    prepare_session_for_modeling,
     session_paths,
-    truncate_to_matched_pair_length,
 )
 from .metrics import (
     build_oof_constant_mu,
@@ -81,6 +75,51 @@ class StepRecord:
     stat_vs_prev: float = None
     n_pairs: int = None
     accepted: bool = True
+
+
+def _build_grouped_segment_folds(T: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    if T < CV_TOTAL_SEGMENTS:
+        raise ValueError(
+            f"T={T} is smaller than CV_TOTAL_SEGMENTS={CV_TOTAL_SEGMENTS}; "
+            "cannot build non-empty grouped segments."
+        )
+
+    idx = np.arange(T, dtype=np.int64)
+    segments = [seg for seg in np.array_split(idx, CV_TOTAL_SEGMENTS) if seg.size > 0]
+    if len(segments) != CV_TOTAL_SEGMENTS:
+        raise ValueError(
+            f"Expected {CV_TOTAL_SEGMENTS} non-empty segments, got {len(segments)}"
+        )
+
+    n_groups = CV_TOTAL_SEGMENTS // CV_SEGMENTS_PER_GROUP
+    grouped_segments = [
+        segments[g * CV_SEGMENTS_PER_GROUP:(g + 1) * CV_SEGMENTS_PER_GROUP]
+        for g in range(n_groups)
+    ]
+
+    folds_idx_full: List[Tuple[np.ndarray, np.ndarray]] = []
+    for fold_idx in range(CV_SEGMENTS_PER_GROUP):
+        va_idx = np.concatenate(
+            [group[fold_idx] for group in grouped_segments],
+            axis=0,
+        )
+        tr_idx = np.concatenate(
+            [
+                seg
+                for group in grouped_segments
+                for seg_idx, seg in enumerate(group)
+                if seg_idx != fold_idx
+            ],
+            axis=0,
+        )
+        folds_idx_full.append((tr_idx, va_idx))
+    return folds_idx_full
+
+
+def build_cv_folds(T: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    if CV_SPLIT_MODE == "grouped_segments":
+        return _build_grouped_segment_folds(T)
+    raise ValueError(f"Unsupported CV_SPLIT_MODE: {CV_SPLIT_MODE!r}")
 
 
 def _compute_forward_search_metric(
@@ -304,6 +343,9 @@ def _plot_selected_models(
     Y_all: np.ndarray,
     folds_idx: List[Tuple[np.ndarray, np.ndarray]],
 ):
+    if SKIP_SMALL_ARTIFACT_WRITES:
+        return
+
     fig_dir = OUT_ROOT / "figures"
     if not rows:
         return
@@ -343,7 +385,6 @@ def _plot_selected_models(
 
 def run_one_session(
     session: str,
-    use_residual_speed: bool = False,
     weights_base: Path | None = None,
 ) -> Tuple[bool, str]:
     if weights_base is None:
@@ -357,60 +398,18 @@ def run_one_session(
     for k in required_inputs:
         if not paths[k].exists():
             return False, f"Missing input {k}: {paths[k]}"
+    try:
+        data_dict, Y_all, prep_meta = prepare_session_for_modeling(session, paths)
+    except Exception as exc:  # pylint: disable=broad-except
+        return False, str(exc)
 
-    data_dict = rebuild_inputs_50hz(session, paths)
+    matched_len = prep_meta.get("matched_len")
+    if matched_len is not None:
+        print(f"[pair_match] {session}: truncated to matched indoor/outdoor length {matched_len}")
 
-    Y50 = load_spikes_50hz_counts(paths["spike"])  # (T50_spk, N)
-    T_spk, N_NEURONS = Y50.shape
-
-    T_cov = int(data_dict["T"])
-    T = min(T_cov, T_spk)
-    print("ok")
-    if abs(T_cov - T_spk) > MAX_MISMATCH_FRAMES_50HZ:
-        return False, f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={T_cov}, spk={T_spk}"
-
-    for k, v in list(data_dict.items()):
-        if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == T_cov:
-            data_dict[k] = v[:T]
-    Y_all = Y50[:T].astype(np.float64)
-
-    if MATCH_INDOOR_OUTDOOR_LENGTHS:
-        target_len = matched_pair_target_length_50hz(session)
-        data_dict["T"] = int(T)
-        data_dict, Y_all, matched_len = truncate_to_matched_pair_length(session, data_dict, Y_all)
-        if matched_len is not None:
-            print(f"[pair_match] {session}: truncated to matched indoor/outdoor length {matched_len}")
-
-    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
-    if speed_mask is not None and not speed_mask.any():
-        return False, f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s"
-
-    if use_residual_speed:
-        data_dict = apply_residual_speed(data_dict)
-
-    T = int(data_dict["T"])
-    if Y_all.shape[0] != T:
-        return False, f"Post-filter length mismatch: data_dict[T]={T}, Y={Y_all.shape[0]}"
-
-    # # rng = np.random.default_rng(SEED)
-    # permuted_idx = rng.permutation(T)
-    # permuted_idx = np.arange(T)
-    rng = np.random.default_rng(SEED)
-    print("T", T)
-    fs = 50  # Hz
-    block_sec = 600  # 10 min
-    block_size = fs * block_sec  # 3000
-    idx = np.arange(T)
-    blocks = [
-        idx[i:i + block_size]
-        for i in range(0, T, block_size)
-    ]
-    rng.shuffle(blocks)
-    permuted_idx = np.concatenate(blocks)
-    kf_full = KFold(n_splits=CV_FOLDS, shuffle=False)
-    folds_idx_full = [
-        (permuted_idx[tr], permuted_idx[va]) for tr, va in kf_full.split(permuted_idx)
-    ]
+    T = int(prep_meta["t_final"])
+    N_NEURONS = int(prep_meta["n_neurons"])
+    folds_idx_full = build_cv_folds(T)
     fold_val_indices = [va for _tr, va in folds_idx_full]
     if CV_VAL_FOLDS < 1 or CV_VAL_FOLDS >= CV_FOLDS:
         raise ValueError(f"CV_VAL_FOLDS must be in [1, {CV_FOLDS - 1}]")

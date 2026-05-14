@@ -35,7 +35,7 @@ def find_cellinfo_mat(day_dir: Path) -> Optional[Path]:
     return None
 
 
-def build_dayid_to_cellinfo(day_search_dirs: List[Path] | None = None) -> Dict[str, Path]:
+def build_dayid_to_cellinfo(day_search_dirs: Optional[List[Path]] = None) -> Dict[str, Path]:
     mapping: Dict[str, Path] = {}
     search_dirs = day_search_dirs or DAY_SEARCH_DIRS
     for dd in search_dirs:

@@ -6,11 +6,11 @@ Drop-one contribution plotting (pyramidal-only) with:
   - PLUS indoor-only and outdoor-only plots (per-feature), where feature order is
     sorted by group mean (high -> low)
   - Feature selection via --features (comma-separated). Features not listed are ignored.
-  - Optional: use --forward_modulated_only to limit each feature to neurons whose forward-search
-    final model includes that feature (still pyramidal only).
+  - Optional: use --no-forward_modulated_only to disable the default filter that limits each
+    feature to neurons whose forward-search final model includes that feature.
   - Optional: use --paired_fit_only to keep only cells that were fit for a feature in both indoor and outdoor.
   - Filter: only neurons with full LL gain/LLHI >= threshold enter downstream analysis
-  - Plots rLLR, ΔLLHI, rLLHI, and rSCC in one run.
+  - By default, plots rLLR, ΔLLHI, rLLHI, and rSCC in one run.
   - By default, uses shuffle-normalized z-scores for rLLR and ΔLLHI (use --use_raw to plot raw ΔLLHI).
   - No bootstrap CI bars. Use boxplot whiskers/caps; y-lims auto from whiskers/caps.
 
@@ -82,17 +82,17 @@ from contribution_rllr_utils import (
     plot_dropone_suite as plot_dropone_suite_rllr,
     pyramidal_indices_for_session,
 )
-from glm_poisson_forward.config import FS_HZ, INCLUDE_TIME_VARIABLE, SPIKE_ROOT, VARIABLE_COMPOSITES
-from glm_poisson_forward.io_utils import load_spikes_50hz_counts
+from glm_poisson_forward.config import FS_HZ, INCLUDE_TIME_VARIABLE, VARIABLE_COMPOSITES, WEIGHTS_BASE
+from glm_poisson_forward.io_utils import load_spikes_50hz_counts, session_paths
 
 mpl.rcParams["font.family"] = "sans-serif"
 mpl.rcParams["font.sans-serif"] = ["Liberation Sans", "Arial", "DejaVu Sans"]
 
 
 DEFAULT_FEATURES = ["Position", "Speed", "roll", "yaw", "pitch"] + (["Time"] if INCLUDE_TIME_VARIABLE else [])
-DEFAULT_MIN_FIRING_RATE_HZ = 0.0
+DEFAULT_MIN_FIRING_RATE_HZ = 0.02
 DEFAULT_H_DIST_N_BINS = 100
-DEFAULT_METRICS = ["delta_llhi"]
+DEFAULT_METRICS = ["rllr", "delta_llhi", "rllhi", "rscc"]
 
 
 def _parse_composite_spec(spec: str) -> dict[str, list[str]]:
@@ -190,7 +190,7 @@ def _active_cell_count_for_session(
 ) -> int | None:
     import numpy as np
 
-    spike_path = SPIKE_ROOT / f"{session}_200Hz.h5"
+    spike_path = session_paths(session)["spike"]
     if not spike_path.exists():
         print(f"[WARN] {session}: spike file missing for H distribution denominator: {spike_path}")
         return None
@@ -590,7 +590,7 @@ def _write_forest_plot_per_metric(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights_base", type=str,
-                    default=r"/home/js3785/Codes/GLM_test/GLM_Final/weights_Poisson_forward")
+                    default=str(WEIGHTS_BASE))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max_scatter_points", type=int, default=0, help="0 = no subsampling")
     ap.add_argument("--ylim_pad_frac", type=float, default=0.08)
@@ -614,29 +614,33 @@ def main():
     )
     ap.add_argument(
         "--use_raw",
-        default=False,
-        help="If set, plot raw ΔLLHI instead of shuffle-normalized z-scores.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Plot raw ΔLLHI instead of shuffle-normalized z-scores. Default: z-scores.",
     )
     ap.add_argument(
         "--forward_modulated_only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="If set, per-feature neurons are restricted to those whose forward-search final model includes that feature.",
+        help="Restrict each feature to neurons whose forward-search final model includes that feature. Default: on.",
     )
     ap.add_argument(
         "--include_unfit_cells",
+        action=argparse.BooleanOptionalAction,
         default=False,
-        help="If set, include unfit cells as zeros in aggregation; otherwise exclude them.",
+        help="Include unfit cells as zeros in aggregation. Default: off.",
     )
     ap.add_argument(
         "--paired_fit_only",
+        action=argparse.BooleanOptionalAction,
         default=False,
-        help="If set, per-feature neurons are restricted to cells fit in both indoor and outdoor for that feature.",
+        help="Restrict each feature to cells fit in both indoor and outdoor. Default: off.",
     )
     ap.add_argument(
         "--pyramidal_only",
+        action=argparse.BooleanOptionalAction,
         default=False,
-        help="If set, use pyramidal-cell statistics only; otherwise include all cells.",
+        help="Use pyramidal-cell statistics only. Default: on.",
     )
     ap.add_argument(
         "--draw_suite_plots",

@@ -17,8 +17,11 @@ from .config import (
     INPUT_FILES,
     MATCHED_SESSION_ALIGN,
     MATCH_INDOOR_OUTDOOR_LENGTHS,
+    MAX_MISMATCH_FRAMES_50HZ,
+    MIN_SPEED_CM_S,
     SPIKE_COUNT_ROOT,
     SPIKE_INPUT_MODE,
+    TRIM_AND_BIN_PER_SESSION,
     VARS_ALL,
     VARIABLE_SPECS,
     SPIKE_ROOT,
@@ -132,6 +135,21 @@ def _continuous_channel_specs(var_name: str) -> list[dict]:
     return out
 
 
+def _resolve_speed_channel_keys() -> tuple[str, str]:
+    speed_spec = VARIABLE_SPECS.get("Speed", {})
+    speed_channels = _continuous_channel_specs("Speed") if speed_spec else []
+    speed_raw_key = "head_v"
+    speed_bin_key = "head_v_bin"
+    if speed_channels:
+        if any(c["raw_key"] == "head_v" for c in speed_channels):
+            speed_raw_key = "head_v"
+            speed_bin_key = "head_v_bin"
+        else:
+            speed_raw_key = speed_channels[0]["raw_key"]
+            speed_bin_key = speed_channels[0]["bin_key"]
+    return speed_raw_key, speed_bin_key
+
+
 def list_sessions_imu(root):
     if not root.exists():
         return set()
@@ -220,8 +238,19 @@ def _load_global_circular_trim_range(
         return _CIRCULAR_TRIM_RANGE[cache_key]
 
 
+def _compute_session_circular_trim_range(
+    var_name: str,
+    series: np.ndarray,
+) -> tuple[float, float]:
+    lower_pct, upper_pct = VARIABLE_SPECS[var_name].get("trim_percentiles", (1.0, 99.0))
+    return circular_trim_range(series, lower_pct, upper_pct)
+
+
 def warmup_global_circular_trim_ranges(max_workers: int = 8) -> None:
     """Precompute circular trim ranges once before running per-session jobs."""
+    if TRIM_AND_BIN_PER_SESSION:
+        return
+
     tasks: list[tuple[str, str, str | None]] = []
     for var_name in VARS_ALL:
         spec = VARIABLE_SPECS.get(var_name, {})
@@ -558,11 +587,14 @@ def rebuild_inputs_50hz(session: str, paths: Dict[str, object]) -> Dict[str, np.
             if "bin_range" in spec:
                 vmin, vmax = spec["bin_range"]
             if "trim_percentiles" in spec:
-                trim_start, trim_width = _load_global_circular_trim_range(
-                    var,
-                    c["csv_col"],
-                    source_key=c.get("source_key"),
-                )
+                if TRIM_AND_BIN_PER_SESSION:
+                    trim_start, trim_width = _compute_session_circular_trim_range(var, series)
+                else:
+                    trim_start, trim_width = _load_global_circular_trim_range(
+                        var,
+                        c["csv_col"],
+                        source_key=c.get("source_key"),
+                    )
                 series_to_bin = shift_angles(series, trim_start)
                 vmin, vmax = 0.0, trim_width
             else:
@@ -577,11 +609,14 @@ def filter_by_min_speed(
     Y_all: np.ndarray,
     min_speed_cm_s: float,
 ) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray | None]:
-    if min_speed_cm_s <= 0:
-        return data_dict, Y_all, None
-    head_v = data_dict.get("head_v")
+    speed_raw_key, _speed_bin_key = _resolve_speed_channel_keys()
+    head_v = data_dict.get(speed_raw_key)
+    if head_v is None:
+        head_v = data_dict.get("head_v")
     if head_v is None:
         return data_dict, Y_all, None
+    if min_speed_cm_s <= 0:
+        return data_dict, Y_all, np.ones(head_v.shape[0], dtype=bool)
     mask = head_v >= min_speed_cm_s
     if mask.ndim != 1:
         mask = mask.reshape(-1)
@@ -596,40 +631,54 @@ def filter_by_min_speed(
     return filtered, Y_all, mask
 
 
-def apply_residual_speed(data_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    speed_spec = VARIABLE_SPECS.get("Speed", {})
-    speed_channels = _continuous_channel_specs("Speed") if speed_spec else []
-    speed_raw_key = "head_v"
-    speed_bin_key = "head_v_bin"
-    if speed_channels:
-        if any(c["raw_key"] == "head_v" for c in speed_channels):
-            speed_raw_key = "head_v"
-            speed_bin_key = "head_v_bin"
-        else:
-            speed_raw_key = speed_channels[0]["raw_key"]
-            speed_bin_key = speed_channels[0]["bin_key"]
+def prepare_session_for_modeling(
+    session: str,
+    paths: Dict[str, object] | None = None,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, Dict[str, object]]:
+    if paths is None:
+        paths = session_paths(session)
 
-    head_v = data_dict.get(speed_raw_key)
-    pos_idx = data_dict.get("position")
-    n_pos = data_dict.get("n_pos")
-    if head_v is None or pos_idx is None or n_pos is None:
-        return data_dict
+    required_inputs = ["spike"] + list(INPUT_FILES.keys())
+    for key in required_inputs:
+        path = Path(paths[key])
+        if not path.exists():
+            raise FileNotFoundError(f"Missing input {key}: {path}")
 
-    n_pos = int(n_pos)
-    sums = np.bincount(pos_idx, weights=head_v, minlength=n_pos)
-    counts = np.bincount(pos_idx, minlength=n_pos)
-    mean_speed = np.divide(sums, counts, out=np.zeros_like(sums, dtype=np.float32), where=counts > 0)
-    speed_hat = mean_speed[pos_idx]
-    speed_res = head_v - speed_hat
+    data_dict = rebuild_inputs_50hz(session, paths)
+    Y50 = load_spikes_50hz_counts(paths["spike"])
+    t_spk, n_neurons = Y50.shape
 
-    updated = dict(data_dict)
-    updated[f"{speed_raw_key}_raw"] = head_v.astype(np.float32)
-    updated[speed_raw_key] = speed_res.astype(np.float32)
-    updated["speed_hat"] = speed_hat.astype(np.float32)
-    n_bins = 15
-    for c in speed_channels:
-        if c["raw_key"] == speed_raw_key:
-            n_bins = int(c["n_bins"])
-            break
-    updated[speed_bin_key] = bin_col(speed_res, n_bins=n_bins)
-    return updated
+    t_cov = int(data_dict["T"])
+    if abs(t_cov - t_spk) > MAX_MISMATCH_FRAMES_50HZ:
+        raise ValueError(
+            f"Length mismatch @50Hz (> {MAX_MISMATCH_FRAMES_50HZ}): cov={t_cov}, spk={t_spk}"
+        )
+
+    t_common = min(t_cov, t_spk)
+    for key, value in list(data_dict.items()):
+        if isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] == t_cov:
+            data_dict[key] = value[:t_common]
+    Y_all = Y50[:t_common].astype(np.float64)
+
+    matched_len = None
+    if MATCH_INDOOR_OUTDOOR_LENGTHS:
+        data_dict["T"] = int(t_common)
+        data_dict, Y_all, matched_len = truncate_to_matched_pair_length(session, data_dict, Y_all)
+
+    data_dict, Y_all, speed_mask = filter_by_min_speed(data_dict, Y_all, MIN_SPEED_CM_S)
+    if speed_mask is not None and not speed_mask.any():
+        raise ValueError(f"No samples >= min speed {MIN_SPEED_CM_S:g} cm/s")
+
+    t_final = int(data_dict["T"])
+    if Y_all.shape[0] != t_final:
+        raise ValueError(f"Post-filter length mismatch: data_dict[T]={t_final}, Y={Y_all.shape[0]}")
+
+    meta: Dict[str, object] = {
+        "paths": paths,
+        "matched_len": matched_len,
+        "n_neurons": int(n_neurons),
+        "t_cov": int(t_cov),
+        "t_spk": int(t_spk),
+        "t_final": int(t_final),
+    }
+    return data_dict, Y_all, meta
