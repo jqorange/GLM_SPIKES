@@ -12,6 +12,7 @@ import pandas as pd
 from .angle_utils import circular_trim_range, shift_angles
 from .config import (
     AGG_FACTOR,
+    ASM_CSV_ROOT,
     FS_HZ,
     IMU_ROOT,
     INPUT_FILES,
@@ -21,6 +22,7 @@ from .config import (
     MIN_SPEED_CM_S,
     SPIKE_COUNT_ROOT,
     SPIKE_INPUT_MODE,
+    TARGET_INPUT_MODE,
     TRIM_AND_BIN_PER_SESSION,
     VARS_ALL,
     VARIABLE_SPECS,
@@ -292,6 +294,41 @@ def list_sessions_spike(root):
     return out
 
 
+def _session_tokens(session: str) -> list[str]:
+    toks = session.replace("-", "_").split("_")
+    return [t.lower() for t in toks if t]
+
+
+def _asm_session_score(session: str, asm_stem: str) -> int:
+    session_tokens = _session_tokens(session)
+    stem_tokens = _session_tokens(asm_stem)
+    score = 0
+    for tok in session_tokens:
+        if tok in stem_tokens:
+            score += 1
+    return score
+
+
+def _find_asm_csv_for_session(session: str) -> Path:
+    roots = [ASM_CSV_ROOT / "indoor", ASM_CSV_ROOT / "outdoor", ASM_CSV_ROOT]
+    candidates: list[Path] = []
+    for root in roots:
+        if root.exists():
+            candidates.extend(root.rglob("*.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"No asm csv files found under {ASM_CSV_ROOT}")
+
+    scored = []
+    for p in candidates:
+        sc = _asm_session_score(session, p.stem)
+        if sc > 0:
+            scored.append((sc, len(p.stem), p))
+    if not scored:
+        raise FileNotFoundError(f"No asm csv matched session={session!r} under {ASM_CSV_ROOT}")
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return scored[0][2]
+
+
 def list_sessions_dlc_final(root):
     if not root.exists():
         return set()
@@ -321,7 +358,11 @@ def list_sessions_position(root):
 
 
 def session_paths(session: str) -> Dict[str, object]:
-    paths = {"spike": _spike_root() / _spike_file_name(session)}
+    if TARGET_INPUT_MODE == "spike":
+        target_path = _spike_root() / _spike_file_name(session)
+    else:
+        target_path = _find_asm_csv_for_session(session)
+    paths = {"spike": target_path}
     for key, spec in INPUT_FILES.items():
         filename = spec["filename"].format(session=session)
         if spec.get("parent_dir_is_session", False):
@@ -349,6 +390,9 @@ def _slice_time_axis(arr: np.ndarray, target_len: int, align: str) -> np.ndarray
 
 
 def _spike_length_50hz(h5_path: Path) -> int:
+    if TARGET_INPUT_MODE == "asm":
+        df = pd.read_csv(h5_path, usecols=["timestamp"])
+        return int(df.shape[0])
     with h5py.File(h5_path, "r") as hf:
         if SPIKE_INPUT_MODE == "binary":
             t1000 = int(hf["spike_binary"].shape[0])
@@ -509,6 +553,13 @@ def is_session_done(session: str, weights_base) -> bool:
 
 
 def load_spikes_50hz_counts(h5_path) -> np.ndarray:
+    if TARGET_INPUT_MODE == "asm":
+        df = pd.read_csv(h5_path)
+        asm_cols = [c for c in df.columns if str(c).startswith("asm_")]
+        if not asm_cols:
+            raise ValueError(f"No asm_* columns found in {h5_path}")
+        return df[asm_cols].to_numpy(dtype=np.float32)
+
     with h5py.File(h5_path, "r") as hf:
         if SPIKE_INPUT_MODE == "binary":
             Y1000 = hf["spike_binary"][:].astype(np.int16)  # (T1000, N)

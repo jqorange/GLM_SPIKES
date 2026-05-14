@@ -4,6 +4,7 @@ from pathlib import Path
 IMU_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/IMU_results")
 SPIKE_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/spike_binary")
 SPIKE_COUNT_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/spike_count")
+ASM_CSV_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/activation_csv_50hz/separate_self/task")
 DLC_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/DLC_results")
 POSITION_ROOT = Path(r"/home/js3785/Dataset/GLM_Data/position_50hz")
 
@@ -14,6 +15,13 @@ SPIKE_INPUT_MODE = "count"
 if SPIKE_INPUT_MODE not in {"binary", "count"}:
     raise ValueError(f"SPIKE_INPUT_MODE must be 'binary' or 'count', got {SPIKE_INPUT_MODE!r}")
 SPIKE_INPUT_ROOT = SPIKE_ROOT if SPIKE_INPUT_MODE == "binary" else SPIKE_COUNT_ROOT
+
+# Target input mode:
+# - "spike": use per-neuron spike targets from spike files
+# - "asm":   use per-assembly activation targets from CSV files (asm_*)
+TARGET_INPUT_MODE = "asm"
+if TARGET_INPUT_MODE not in {"spike", "asm"}:
+    raise ValueError(f"TARGET_INPUT_MODE must be 'spike' or 'asm', got {TARGET_INPUT_MODE!r}")
 
 # Output root
 WEIGHTS_BASE = Path("weights_Poisson_forward")

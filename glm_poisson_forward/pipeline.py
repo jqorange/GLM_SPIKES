@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from .config import DLC_ROOT, IMU_ROOT, POSITION_ROOT, SPIKE_INPUT_ROOT, WEIGHTS_BASE
+from .config import (
+    DLC_ROOT,
+    IMU_ROOT,
+    POSITION_ROOT,
+    SPIKE_INPUT_ROOT,
+    TARGET_INPUT_MODE,
+    WEIGHTS_BASE,
+)
 from .forward_search import run_one_session
 from .io_utils import (
     is_session_done,
@@ -22,7 +29,7 @@ def main(weights_base: Path | None = None):
         weights_base = WEIGHTS_BASE
     weights_base.mkdir(parents=True, exist_ok=True)
     set_imu = list_sessions_imu(IMU_ROOT)
-    set_spk = list_sessions_spike(SPIKE_INPUT_ROOT)
+    set_spk = list_sessions_spike(SPIKE_INPUT_ROOT) if TARGET_INPUT_MODE == "spike" else set_imu
     set_dlc = list_sessions_dlc_final(DLC_ROOT)
     set_pos = list_sessions_position(POSITION_ROOT)
 
