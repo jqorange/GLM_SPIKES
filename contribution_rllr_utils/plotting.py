@@ -8,22 +8,47 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib
-import matplotlib.cm as mpl_cm
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Patch
 
 from glm_poisson_forward.config import VARIABLE_COMPOSITES, VARS_ALL
 
-blue_cmap = mpl_cm.get_cmap("Blues")
-orange_cmap = mpl_cm.get_cmap("Oranges")
 HEAD_POSE_FEATURE = "H"
 HEAD_POSE_COMPONENTS = tuple(VARIABLE_COMPOSITES.get(HEAD_POSE_FEATURE, ["roll", "yaw", "pitch"]))
-INDOOR_COLOR = blue_cmap(0.75)
-OUTDOOR_COLOR = orange_cmap(0.75)
-PAIRED_LINE_COLOR = (1.0, 0.4, 0.4)
+INDOOR_COLOR = "#838383"
+OUTDOOR_COLOR = "#61B861"
+POINT_COLOR = "#838383"
+PAIRED_LINE_COLOR = "#B5B5B5"
+YLABEL_FONTSIZE = 18
+TICK_LABEL_FONTSIZE = 15
+AXIS_LINEWIDTH = 1.8
+BOX_LINEWIDTH = 1.8
+MEDIAN_LINEWIDTH = 2.2
+WHISKER_LINEWIDTH = 1.8
+CAP_LINEWIDTH = 1.8
+REFERENCE_LINEWIDTH = 1.8
+
+
+def _shift_color(color: str, amount: float):
+    rgb = np.array(matplotlib.colors.to_rgb(color), dtype=float)
+    amount = float(np.clip(amount, -0.22, 0.42))
+    if amount >= 0.0:
+        mixed = rgb * (1.0 - amount) + amount
+    else:
+        mixed = rgb * (1.0 + amount)
+    return tuple(np.clip(mixed, 0.0, 1.0))
+
+
+def _feature_shade_map(features: Sequence[str], base_color: str) -> Dict[str, tuple]:
+    feature_list = list(features)
+    if not feature_list:
+        return {}
+    if len(feature_list) == 1:
+        return {feature_list[0]: _shift_color(base_color, 0.0)}
+    shade_levels = np.linspace(-0.14, 0.34, len(feature_list))
+    return {feat: _shift_color(base_color, shade) for feat, shade in zip(feature_list, shade_levels)}
 
 @dataclass
 class DroponeSessionStats:
@@ -839,8 +864,11 @@ def plot_combined_indoor_outdoor(
 ):
     rng = np.random.default_rng(seed)
     features_sorted = list(features)
+    indoor_colors = _feature_shade_map(features_sorted, INDOOR_COLOR)
+    outdoor_colors = _feature_shade_map(features_sorted, OUTDOOR_COLOR)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig_w = max(4.8, 0.72 * len(features_sorted) + 0.8)
+    fig, ax = plt.subplots(figsize=(fig_w, 4))
 
     x = np.arange(len(features_sorted))
     vals_in = [data_in.get(f, np.array([], dtype=float)) for f in features_sorted]
@@ -849,28 +877,76 @@ def plot_combined_indoor_outdoor(
     x_in_offset = +0.18
     x_out_offset = -0.18
 
-    bp_in = ax.boxplot(vals_in, positions=x + x_in_offset, widths=0.3, patch_artist=True, showfliers=False)
-    bp_out = ax.boxplot(vals_out, positions=x + x_out_offset, widths=0.3, patch_artist=True, showfliers=False)
+    bp_in = ax.boxplot(
+        vals_in,
+        positions=x + x_in_offset,
+        widths=0.3,
+        patch_artist=True,
+        showfliers=False,
+        boxprops=dict(linewidth=BOX_LINEWIDTH),
+        medianprops=dict(linewidth=MEDIAN_LINEWIDTH),
+        whiskerprops=dict(linewidth=WHISKER_LINEWIDTH),
+        capprops=dict(linewidth=CAP_LINEWIDTH),
+    )
+    bp_out = ax.boxplot(
+        vals_out,
+        positions=x + x_out_offset,
+        widths=0.3,
+        patch_artist=True,
+        showfliers=False,
+        boxprops=dict(linewidth=BOX_LINEWIDTH),
+        medianprops=dict(linewidth=MEDIAN_LINEWIDTH),
+        whiskerprops=dict(linewidth=WHISKER_LINEWIDTH),
+        capprops=dict(linewidth=CAP_LINEWIDTH),
+    )
 
-    for box in bp_in["boxes"]:
-        box.set_facecolor(INDOOR_COLOR)
+    for i, box in enumerate(bp_in["boxes"]):
+        color = indoor_colors[features_sorted[i]]
+        box.set_facecolor(color)
+        box.set_edgecolor(color)
         box.set_alpha(0.55)
-    for box in bp_out["boxes"]:
-        box.set_facecolor(OUTDOOR_COLOR)
+        bp_in["medians"][i].set_color(color)
+        for whisker in bp_in["whiskers"][2 * i: 2 * i + 2]:
+            whisker.set_color(color)
+        for cap in bp_in["caps"][2 * i: 2 * i + 2]:
+            cap.set_color(color)
+    for i, box in enumerate(bp_out["boxes"]):
+        color = outdoor_colors[features_sorted[i]]
+        box.set_facecolor(color)
+        box.set_edgecolor(color)
         box.set_alpha(0.55)
+        bp_out["medians"][i].set_color(color)
+        for whisker in bp_out["whiskers"][2 * i: 2 * i + 2]:
+            whisker.set_color(color)
+        for cap in bp_out["caps"][2 * i: 2 * i + 2]:
+            cap.set_color(color)
 
     for i, f in enumerate(features_sorted):
         y = np.asarray(data_in.get(f, np.array([], dtype=float)), dtype=float)
         y = y[np.isfinite(y)]
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
-        ax.scatter(x[i] + x_in_offset + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+        ax.scatter(
+            x[i] + x_in_offset + jitter_points(rng, y.size, scale=0),
+            y,
+            s=12,
+            alpha=0.70,
+            color=indoor_colors[f],
+            zorder=3,
+        )
 
         y = np.asarray(data_out.get(f, np.array([], dtype=float)), dtype=float)
         y = y[np.isfinite(y)]
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
-        ax.scatter(x[i] + x_out_offset + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+        ax.scatter(
+            x[i] + x_out_offset + jitter_points(rng, y.size, scale=0),
+            y,
+            s=12,
+            alpha=0.70,
+            color=outdoor_colors[f],
+            zorder=3,
+        )
 
         if paired_points is not None:
             pairs = paired_points.get(f, [])
@@ -882,27 +958,23 @@ def plot_combined_indoor_outdoor(
                     [yin, yout],
                     color=PAIRED_LINE_COLOR,
                     alpha=0.35,
-                    linewidth=0.6,
+                    linewidth=REFERENCE_LINEWIDTH,
                     zorder=2,
                 )
 
     ax.set_xticks(x)
     ax.set_xticklabels(features_sorted, rotation=0)
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel(ylabel, fontsize=YLABEL_FONTSIZE)
     ax.set_title(title)
-    ax.axhline(0.0, linewidth=1.0, alpha=0.35)
-
-    ax.legend(
-        handles=[
-            Patch(facecolor=OUTDOOR_COLOR, edgecolor=OUTDOOR_COLOR, alpha=0.55, label="outdoor"),
-            Patch(facecolor=INDOOR_COLOR, edgecolor=INDOOR_COLOR, alpha=0.55, label="indoor"),
-        ],
-        frameon=False,
-        loc="upper right",
-    )
+    ax.axhline(0.0, linewidth=REFERENCE_LINEWIDTH, alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(AXIS_LINEWIDTH)
+    ax.spines["bottom"].set_linewidth(AXIS_LINEWIDTH)
+    ax.tick_params(axis="both", width=AXIS_LINEWIDTH, labelsize=TICK_LABEL_FONTSIZE)
 
     if shuffle95_line is not None and np.isfinite(shuffle95_line):
-        ax.axhline(shuffle95_line, linestyle="--", linewidth=1.2, color="red", alpha=0.8)
+        ax.axhline(shuffle95_line, linestyle="--", linewidth=REFERENCE_LINEWIDTH, color="red", alpha=0.8)
 
     set_ylim_from_boxplot({"whiskers": bp_in["whiskers"] + bp_out["whiskers"], "caps": bp_in["caps"] + bp_out["caps"], "medians": bp_in["medians"] + bp_out["medians"], "boxes": bp_in["boxes"] + bp_out["boxes"]}, ax, pad_frac=ylim_pad_frac)
 
@@ -927,42 +999,67 @@ def plot_single_group_sorted(
 ):
     rng = np.random.default_rng(seed)
     features_sorted = list(features_sorted)
+    feature_colors = _feature_shade_map(
+        features_sorted,
+        INDOOR_COLOR if group_label == "indoor" else OUTDOOR_COLOR,
+    )
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig_w = max(4.8, 0.72 * len(features_sorted) + 0.8)
+    fig, ax = plt.subplots(figsize=(fig_w, 4))
 
     x = np.arange(len(features_sorted))
     vals = [data.get(f, np.array([], dtype=float)) for f in features_sorted]
 
-    bp = ax.boxplot(vals, positions=x, widths=0.5, patch_artist=True, showfliers=False)
+    bp = ax.boxplot(
+        vals,
+        positions=x,
+        widths=0.5,
+        patch_artist=True,
+        showfliers=False,
+        boxprops=dict(linewidth=BOX_LINEWIDTH),
+        medianprops=dict(linewidth=MEDIAN_LINEWIDTH),
+        whiskerprops=dict(linewidth=WHISKER_LINEWIDTH),
+        capprops=dict(linewidth=CAP_LINEWIDTH),
+    )
 
-    fc = INDOOR_COLOR if group_label == "indoor" else OUTDOOR_COLOR
-    edge_c = INDOOR_COLOR if group_label == "indoor" else OUTDOOR_COLOR
-
-    for box in bp["boxes"]:
-        box.set_facecolor(fc)
+    for i, box in enumerate(bp["boxes"]):
+        color = feature_colors[features_sorted[i]]
+        box.set_facecolor(color)
+        box.set_edgecolor(color)
         box.set_alpha(0.55)
+        bp["medians"][i].set_color(color)
+        for whisker in bp["whiskers"][2 * i: 2 * i + 2]:
+            whisker.set_color(color)
+        for cap in bp["caps"][2 * i: 2 * i + 2]:
+            cap.set_color(color)
 
     for i, f in enumerate(features_sorted):
         y = np.asarray(data.get(f, np.array([], dtype=float)), dtype=float)
         y = y[np.isfinite(y)]
         if max_scatter_points and y.size > max_scatter_points:
             y = rng.choice(y, size=max_scatter_points, replace=False)
-        ax.scatter(x[i] + jitter_points(rng, y.size, scale=0), y, s=12, alpha=0.70, color="k", zorder=3)
+        ax.scatter(
+            x[i] + jitter_points(rng, y.size, scale=0),
+            y,
+            s=12,
+            alpha=0.70,
+            color=feature_colors[f],
+            zorder=3,
+        )
 
     ax.set_xticks(x)
     ax.set_xticklabels(features_sorted, rotation=0)
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel(ylabel, fontsize=YLABEL_FONTSIZE)
     ax.set_title(title)
-    ax.axhline(0.0, linewidth=1.0, alpha=0.35)
-
-    ax.legend(
-        handles=[Patch(facecolor=fc, edgecolor=edge_c, alpha=0.55, label=group_label)],
-        frameon=False,
-        loc="upper right",
-    )
+    ax.axhline(0.0, linewidth=REFERENCE_LINEWIDTH, alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(AXIS_LINEWIDTH)
+    ax.spines["bottom"].set_linewidth(AXIS_LINEWIDTH)
+    ax.tick_params(axis="both", width=AXIS_LINEWIDTH, labelsize=TICK_LABEL_FONTSIZE)
 
     if shuffle95_line is not None and np.isfinite(shuffle95_line):
-        ax.axhline(shuffle95_line, linestyle="--", linewidth=1.2, color="red", alpha=0.8)
+        ax.axhline(shuffle95_line, linestyle="--", linewidth=REFERENCE_LINEWIDTH, color="red", alpha=0.8)
 
     set_ylim_from_boxplot(bp, ax, pad_frac=ylim_pad_frac)
 

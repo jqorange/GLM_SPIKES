@@ -16,7 +16,7 @@ DEFAULT_WEIGHTS_BASE = REPO_ROOT / "weights_Poisson_forward"
 DEFAULT_OUTPUT_DIR = DEFAULT_WEIGHTS_BASE / "MS_SCORE"
 FILTERED_NEURON_CSV = "filtered_neuron_ids_ALL.csv"
 EPS = 1e-12
-CANONICAL_FEATURES = ("Position", "Speed", "H")
+CANONICAL_FEATURES = ("Position", "Speed", "roll", "pitch", "yaw")
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Compute per-neuron MS scores from session-level "
             "weights_Poisson_forward/*/RLLR_STATS/dropone_llhi.csv files "
-            "using canonical features Position, Speed, and H."
+            "using canonical features Position, Speed, roll, pitch, and yaw."
         )
     )
     parser.add_argument(

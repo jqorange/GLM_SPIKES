@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 import struct
 from pathlib import Path
 import matplotlib as mpl
@@ -93,6 +94,13 @@ DEFAULT_FEATURES = ["Position", "Speed", "roll", "yaw", "pitch"] + (["Time"] if 
 DEFAULT_MIN_FIRING_RATE_HZ = 0.02
 DEFAULT_H_DIST_N_BINS = 100
 DEFAULT_METRICS = ["rllr", "delta_llhi", "rllhi", "rscc"]
+INDOOR_COLOR = "#838383"
+OUTDOOR_COLOR = "#61B861"
+YLABEL_FONTSIZE = 18
+TICK_LABEL_FONTSIZE = 15
+FOREST_FEATURE_COLORS = ["#E3B4A6", "#DE8FAA", "#C65079"]
+FOREST_DISTRIBUTION_ALPHA = 0.92
+FOREST_PROJECTION_ALPHA = 0.10
 
 
 def _parse_composite_spec(spec: str) -> dict[str, list[str]]:
@@ -179,6 +187,76 @@ def _write_svg_sidecar_from_png(png_path: Path) -> Path:
 def _ensure_svg_for_all_pngs(out_dir: Path) -> None:
     for png in Path(out_dir).rglob("*.png"):
         _write_svg_sidecar_from_png(png)
+
+
+def _forest_palette(labels: list[str]) -> list[str]:
+    if not labels:
+        return FOREST_FEATURE_COLORS[:]
+    return [FOREST_FEATURE_COLORS[i % len(FOREST_FEATURE_COLORS)] for i in range(len(labels))]
+
+
+def _apply_forest_plot_style(labels: list[str]) -> None:
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    fig = plt.gcf()
+    palette = _forest_palette(labels)
+    fig_h = 6.0
+    fig_w = max(4.8, 0.92 * max(1, len(labels)) + 1.95)
+    fig.set_size_inches(fig_w, fig_h, forward=True)
+
+    distribution_artists = []
+    projection_artists = []
+    for ax in fig.axes:
+        ax.margins(x=0.02)
+        ax.tick_params(axis="x", labelsize=TICK_LABEL_FONTSIZE)
+        ax.tick_params(axis="y", labelsize=TICK_LABEL_FONTSIZE)
+
+        for coll in ax.collections:
+            try:
+                face = np.asarray(coll.get_facecolor())
+            except Exception:
+                continue
+            if face.size == 0:
+                continue
+            rgba = np.atleast_2d(face)[0]
+            if rgba.shape[0] < 4 or rgba[3] <= 0:
+                continue
+            if float(np.mean(rgba[:3])) < 0.12:
+                continue
+            distribution_artists.append(coll)
+
+        for patch in ax.patches:
+            try:
+                face = np.asarray(patch.get_facecolor())
+            except Exception:
+                continue
+            rgba = face[0] if face.ndim > 1 else face
+            if rgba.shape[0] < 4 or rgba[3] <= 0:
+                continue
+            if float(np.mean(rgba[:3])) < 0.12:
+                continue
+            projection_artists.append(patch)
+
+    for i, artist in enumerate(distribution_artists):
+        color = palette[i % len(palette)]
+        if hasattr(artist, "set_facecolor"):
+            artist.set_facecolor(color)
+        if hasattr(artist, "set_edgecolor"):
+            artist.set_edgecolor(color)
+        if hasattr(artist, "set_alpha"):
+            artist.set_alpha(FOREST_DISTRIBUTION_ALPHA)
+
+    for i, artist in enumerate(projection_artists):
+        color = palette[i % len(palette)]
+        if hasattr(artist, "set_facecolor"):
+            artist.set_facecolor(color)
+        if hasattr(artist, "set_edgecolor"):
+            artist.set_edgecolor(color)
+        if hasattr(artist, "set_alpha"):
+            artist.set_alpha(FOREST_PROJECTION_ALPHA)
+
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.93, bottom=0.16, hspace=0.06)
 
 
 def _active_cell_count_for_session(
@@ -349,8 +427,8 @@ def _write_h_distribution_plot(
         print(f"[WARN] Skip H distribution for metric={metric_tag}: missing indoor/outdoor H values.")
         return
 
-    plt.figure(figsize=(7.2, 4.8))
-    for group, color in [("indoor", "#2B6CB0"), ("outdoor", "#DD6B20")]:
+    plt.figure(figsize=(6.2, 4.8))
+    for group, color in [("indoor", INDOOR_COLOR), ("outdoor", OUTDOOR_COLOR)]:
         values = []
         weights = []
         n_sessions = 0
@@ -378,9 +456,10 @@ def _write_h_distribution_plot(
         )
 
     plt.xlabel(metric_tag)
-    plt.ylabel("Percent of active cells in current session (%)")
+    plt.ylabel("Percent of active cells in current session (%)", fontsize=YLABEL_FONTSIZE)
     plt.title(f"H contribution distribution: indoor vs outdoor ({metric_tag})")
-    plt.legend(frameon=False)
+    plt.xticks(fontsize=TICK_LABEL_FONTSIZE)
+    plt.yticks(fontsize=TICK_LABEL_FONTSIZE)
     plt.tight_layout()
     out_png = Path(out_dir) / f"H_DIST_{metric_tag}_indoor_vs_outdoor.png"
     _save_current_figure_png_svg(out_png, dpi=300)
@@ -457,15 +536,16 @@ def _write_h_distribution_curve_plot(
         curve["lo"] = lo
         curve["hi"] = hi
 
-    plt.figure(figsize=(7.2, 4.8))
-    plt.plot(centers, curve_in["mean"], color="#2B6CB0", linewidth=2.0, label=f"indoor mean (n={curve_in['n_sessions']} sessions)")
-    plt.fill_between(centers, curve_in["lo"], curve_in["hi"], color="#2B6CB0", alpha=0.20, linewidth=0)
-    plt.plot(centers, curve_out["mean"], color="#DD6B20", linewidth=2.0, label=f"outdoor mean (n={curve_out['n_sessions']} sessions)")
-    plt.fill_between(centers, curve_out["lo"], curve_out["hi"], color="#DD6B20", alpha=0.20, linewidth=0)
+    plt.figure(figsize=(6.2, 4.8))
+    plt.plot(centers, curve_in["mean"], color=INDOOR_COLOR, linewidth=2.0, label=f"indoor mean (n={curve_in['n_sessions']} sessions)")
+    plt.fill_between(centers, curve_in["lo"], curve_in["hi"], color=INDOOR_COLOR, alpha=0.20, linewidth=0)
+    plt.plot(centers, curve_out["mean"], color=OUTDOOR_COLOR, linewidth=2.0, label=f"outdoor mean (n={curve_out['n_sessions']} sessions)")
+    plt.fill_between(centers, curve_out["lo"], curve_out["hi"], color=OUTDOOR_COLOR, alpha=0.20, linewidth=0)
     plt.xlabel(metric_tag)
-    plt.ylabel("Percent of active cells in current session (%)")
+    plt.ylabel("Percent of active cells in current session (%)", fontsize=YLABEL_FONTSIZE)
     plt.title(f"H contribution distribution by session: indoor vs outdoor ({metric_tag})")
-    plt.legend(frameon=False)
+    plt.xticks(fontsize=TICK_LABEL_FONTSIZE)
+    plt.yticks(fontsize=TICK_LABEL_FONTSIZE)
     plt.tight_layout()
     out_png = Path(out_dir) / f"H_DIST_CURVE_{metric_tag}_indoor_vs_outdoor.png"
     _save_current_figure_png_svg(out_png, dpi=300)
@@ -552,31 +632,36 @@ def _write_forest_plot_per_metric(
         print(f"[WARN] No valid feature data for forest plot: metric={metric_tag}")
         return
 
-    dabest.forest_plot(
+    forest_kwargs = dict(
         data=contrasts,
         labels=labels,
         effect_size="median_diff",
         ci_type="bca",
         horizontal=False,
     )
+    try:
+        sig = inspect.signature(dabest.forest_plot)
+        if "custom_palette" in sig.parameters:
+            forest_kwargs["custom_palette"] = _forest_palette(labels)
+        elif "palette" in sig.parameters:
+            forest_kwargs["palette"] = _forest_palette(labels)
+    except Exception:
+        pass
+
+    dabest.forest_plot(**forest_kwargs)
     plt.axhline(0.0, color="k", linewidth=1.0, alpha=0.8)
     plt.title("Outdoor − Indoor")
-    plt.tight_layout()
+    _apply_forest_plot_style(labels)
     mean_forest_path = out_dir / f"FOREST_{metric_tag}{suffix}_by_feature.png"
     _save_current_figure_png_svg(mean_forest_path, dpi=300)
     plt.close()
     print(f"[OK] Wrote forest plot: {mean_forest_path}")
 
-    dabest.forest_plot(
-        data=contrasts,
-        labels=labels,
-        effect_size="cliffs_delta",
-        ci_type="bca",
-        horizontal=False,
-    )
+    forest_kwargs["effect_size"] = "cliffs_delta"
+    dabest.forest_plot(**forest_kwargs)
     plt.axhline(0.0, color="k", linewidth=1.0, alpha=0.8)
     plt.title("Outdoor − Indoor (Cliff's delta)")
-    plt.tight_layout()
+    _apply_forest_plot_style(labels)
     cliffs_forest_path = out_dir / f"FOREST_{metric_tag}{suffix}_cliffs_delta.png"
     _save_current_figure_png_svg(cliffs_forest_path, dpi=300)
     plt.close()

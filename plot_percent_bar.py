@@ -11,13 +11,44 @@ import scipy.stats
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import matplotlib.cm as mpl_cm
-from matplotlib.patches import Patch
 from glm_poisson_forward.config import FS_HZ, INCLUDE_TIME_VARIABLE, SPIKE_INPUT_MODE, SPIKE_INPUT_ROOT
 from glm_poisson_forward.io_utils import load_spikes_50hz_counts
 
 mpl.rcParams["font.family"] = "sans-serif"
 mpl.rcParams["font.sans-serif"] = ["Liberation Sans", "Arial", "DejaVu Sans"]
+
+INDOOR_BASE_COLOR = "#838383"
+OUTDOOR_BASE_COLOR = "#61B861"
+POINT_COLOR = "#838383"
+PAIR_LINE_COLOR = "#B5B5B5"
+YLABEL_FONTSIZE = 18
+TICK_LABEL_FONTSIZE = 15
+AXIS_LINEWIDTH = 1.8
+BOX_LINEWIDTH = 1.8
+MEDIAN_LINEWIDTH = 2.2
+WHISKER_LINEWIDTH = 1.8
+CAP_LINEWIDTH = 1.8
+ANNOTATION_LINEWIDTH = 1.8
+
+
+def _shift_color(color: str, amount: float):
+    rgb = np.array(mpl.colors.to_rgb(color), dtype=float)
+    amount = float(np.clip(amount, -0.22, 0.42))
+    if amount >= 0.0:
+        mixed = rgb * (1.0 - amount) + amount
+    else:
+        mixed = rgb * (1.0 + amount)
+    return tuple(np.clip(mixed, 0.0, 1.0))
+
+
+def _label_shade_map(labels_sorted, base_color: str) -> Dict[str, tuple]:
+    labels = list(labels_sorted)
+    if not labels:
+        return {}
+    if len(labels) == 1:
+        return {labels[0]: _shift_color(base_color, 0.0)}
+    shade_levels = np.linspace(-0.14, 0.34, len(labels))
+    return {lb: _shift_color(base_color, shade) for lb, shade in zip(labels, shade_levels)}
 
 # ===================== 配置区 =====================
 
@@ -748,29 +779,28 @@ def plot_percent_box_by_session(long_df, labels_sorted,
     if long_df.empty or not labels_sorted:
         raise ValueError("没有可用数据：long_df 为空或 labels_sorted 为空。")
 
-    groups = ["outdoor", "indoor"]  # 固定顺序：左 outdoor，右 indoor
+    groups = ["indoor", "outdoor"]  # 固定顺序：左 indoor，右 outdoor
     present_groups = [g for g in groups if g in set(long_df["group"].unique())]
     if not present_groups:
         raise ValueError("long_df 中没有 indoor/outdoor 组数据。")
 
-    blue_cmap = mpl_cm.get_cmap("Blues")
-    orange_cmap = mpl_cm.get_cmap("Oranges")
-    OUTDOOR_COLOR = blue_cmap(0.75)
-    INDOOR_COLOR  = orange_cmap(0.75)
-
     group_color = {
-        "outdoor": OUTDOOR_COLOR,
-        "indoor": INDOOR_COLOR,
+        "outdoor": OUTDOOR_BASE_COLOR,
+        "indoor": INDOOR_BASE_COLOR,
+    }
+    label_color_map = {
+        g: _label_shade_map(labels_sorted, base_color)
+        for g, base_color in group_color.items()
     }
 
     df = long_df.copy()
     df["pair_id"] = df["session"].astype(str).map(_pair_id_from_session_name)
 
-    fig_w = max(4.8, 0.425 * len(labels_sorted))
+    fig_w = max(4.2, 0.34 * len(labels_sorted) + 0.9)
     fig, ax = plt.subplots(figsize=(fig_w, 5.25))
 
     x = np.arange(len(labels_sorted))
-    offsets = {"outdoor": -0.2, "indoor": +0.2}
+    offsets = {"indoor": -0.2, "outdoor": +0.2}
     box_width = 0.32
 
     # Debug prints（保留你原有的检查逻辑）
@@ -787,8 +817,6 @@ def plot_percent_box_by_session(long_df, labels_sorted,
 
     # 先画箱线图（两组）
     for g in present_groups:
-        color = group_color[g]
-
         data = []
         for lb in labels_sorted:
             vals = df.loc[(df["group"] == g) & (df["label"] == lb), "percent"].astype(float).values
@@ -796,17 +824,27 @@ def plot_percent_box_by_session(long_df, labels_sorted,
 
         positions = x + offsets[g]
 
-        ax.boxplot(
+        bp = ax.boxplot(
             data,
             positions=positions,
             widths=box_width,
             patch_artist=True,
             showfliers=False,
-            boxprops=dict(facecolor=color, edgecolor=color, linewidth=1.1, alpha=box_alpha),
-            medianprops=dict(color=color, linewidth=1.3),
-            whiskerprops=dict(color=color, linewidth=1.0, alpha=0.9),
-            capprops=dict(color=color, linewidth=1.0, alpha=0.9),
+            boxprops=dict(linewidth=BOX_LINEWIDTH),
+            medianprops=dict(linewidth=MEDIAN_LINEWIDTH),
+            whiskerprops=dict(linewidth=WHISKER_LINEWIDTH, alpha=0.9),
+            capprops=dict(linewidth=CAP_LINEWIDTH, alpha=0.9),
         )
+        for i, lb in enumerate(labels_sorted):
+            color = label_color_map[g][lb]
+            bp["boxes"][i].set_facecolor(color)
+            bp["boxes"][i].set_edgecolor(color)
+            bp["boxes"][i].set_alpha(box_alpha)
+            bp["medians"][i].set_color(color)
+            for whisker in bp["whiskers"][2 * i: 2 * i + 2]:
+                whisker.set_color(color)
+            for cap in bp["caps"][2 * i: 2 * i + 2]:
+                cap.set_color(color)
 
     # 再画 paired 连线（放在点下面）
     if connect_pairs and ("outdoor" in present_groups) and ("indoor" in present_groups):
@@ -827,7 +865,7 @@ def plot_percent_box_by_session(long_df, labels_sorted,
 
                 for yo, yi in zip(y_out, y_in):
                     ax.plot([x_out, x_in], [yo, yi],
-                            color=(1.0, 0.4, 0.4),  # 浅红
+                            color=PAIR_LINE_COLOR,
                             alpha=pair_line_alpha,
                             linewidth=pair_line_width,
                             zorder=2)
@@ -844,7 +882,7 @@ def plot_percent_box_by_session(long_df, labels_sorted,
                     np.full(vals.size, positions[i]),
                     vals,
                     s=10,
-                    c="0.45",
+                    c=[label_color_map[g][lb]],
                     alpha=point_alpha,
                     linewidths=0,
                     zorder=3,
@@ -852,19 +890,13 @@ def plot_percent_box_by_session(long_df, labels_sorted,
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels_sorted)
-    ax.set_ylabel(f"Percentage of {cell_scope} cells per session (%)")
-
-    # 图例
-    handles = []
-    if "outdoor" in present_groups:
-        handles.append(Patch(facecolor=OUTDOOR_COLOR, edgecolor=OUTDOOR_COLOR, alpha=box_alpha, label="outdoor"))
-    if "indoor" in present_groups:
-        handles.append(Patch(facecolor=INDOOR_COLOR, edgecolor=INDOOR_COLOR, alpha=box_alpha, label="indoor"))
-    if handles:
-        ax.legend(handles=handles, frameon=False, loc="upper right")
+    ax.set_ylabel(f"Percentage of {cell_scope} cells per session (%)", fontsize=YLABEL_FONTSIZE)
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(AXIS_LINEWIDTH)
+    ax.spines["bottom"].set_linewidth(AXIS_LINEWIDTH)
+    ax.tick_params(axis="both", width=AXIS_LINEWIDTH, labelsize=TICK_LABEL_FONTSIZE)
     ax.set_xlim(-0.6, len(labels_sorted) - 0.4)
 
     ymax = max(5.0, float(np.nanmax(df["percent"].values)) * 1.15)
@@ -910,7 +942,7 @@ def plot_percent_box_by_session(long_df, labels_sorted,
         ax.plot([x_out, x_out, x_in, x_in],
                 [line_y - 0.2, line_y, line_y, line_y - 0.2],
                 color="0.2",
-                linewidth=1.0,
+                linewidth=ANNOTATION_LINEWIDTH,
                 zorder=4)
         ax.text(x[i], text_y, stars, ha="center", va="bottom", color="0.15", fontsize=12, zorder=5)
 
@@ -1054,31 +1086,35 @@ def plot_percent_bar_aggregated(long_df, labels_sorted,
     if long_df.empty or not labels_sorted:
         raise ValueError("没有可用数据：long_df 为空或 labels_sorted 为空。")
 
-    groups = ["outdoor", "indoor"]
-    blue_cmap = mpl_cm.get_cmap("Blues")
-    orange_cmap = mpl_cm.get_cmap("Oranges")
-    group_color = {"outdoor": blue_cmap(0.75), "indoor": orange_cmap(0.75)}
+    groups = ["indoor", "outdoor"]
+    group_color = {"outdoor": OUTDOOR_BASE_COLOR, "indoor": INDOOR_BASE_COLOR}
+    label_color_map = {
+        g: _label_shade_map(labels_sorted, base_color)
+        for g, base_color in group_color.items()
+    }
 
-    fig_w = max(7, 0.85 * len(labels_sorted))
+    fig_w = max(4.8, 0.56 * len(labels_sorted) + 0.8)
     fig, ax = plt.subplots(figsize=(fig_w, 5))
     x = np.arange(len(labels_sorted))
-    offsets = {"outdoor": -0.18, "indoor": +0.18}
+    offsets = {"indoor": -0.18, "outdoor": +0.18}
     bar_width = 0.30
 
     for g in groups:
         sub = long_df[long_df["group"] == g].set_index("label")
         vals = [float(sub.at[lb, "percent"]) if lb in sub.index else 0.0 for lb in labels_sorted]
-        ax.bar(x + offsets[g], vals, width=bar_width, color=group_color[g], alpha=bar_alpha, label=g)
+        colors = [label_color_map[g][lb] for lb in labels_sorted]
+        ax.bar(x + offsets[g], vals, width=bar_width, color=colors, alpha=bar_alpha, label=g)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels_sorted)
-    ax.set_ylabel(f"Percentage of {cell_scope} cells across all sessions (%)")
+    ax.set_ylabel(f"Percentage of {cell_scope} cells across all sessions (%)", fontsize=YLABEL_FONTSIZE)
     if title:
         ax.set_title(title)
-
-    ax.legend(frameon=False, loc="upper right")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(AXIS_LINEWIDTH)
+    ax.spines["bottom"].set_linewidth(AXIS_LINEWIDTH)
+    ax.tick_params(axis="both", width=AXIS_LINEWIDTH, labelsize=TICK_LABEL_FONTSIZE)
     ax.set_xlim(-0.6, len(labels_sorted) - 0.4)
     ymax = max(5.0, float(np.nanmax(long_df["percent"].values)) * 1.20)
     ax.set_ylim(0, ymax)
@@ -1238,7 +1274,7 @@ def paired_stats_summary(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pyramidal_only", dest="pyramidal_only", default=False, 
+    ap.add_argument("--pyramidal_only", dest="pyramidal_only", default=True, 
                     help="Compute statistics using pyramidal cells only (default).")
     ap.add_argument("--all_cells", dest="pyramidal_only", action="store_false",
                     help="Use all cells instead of pyramidal-only.")
